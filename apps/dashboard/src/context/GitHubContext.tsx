@@ -42,14 +42,26 @@ export interface GitHubRepo {
 
 export type GitHubMode = "cloud" | "desktop" | "cli" | "token";
 
+/**
+ * Per-source snapshot from the API. Only populated in cli mode. Lets the
+ * settings UI render the Openship App and gh CLI panels independently with
+ * their own connect/disconnect buttons.
+ */
+export interface GitHubSources {
+  oauth: { connected: boolean; login?: string; avatarUrl?: string };
+  cli: { available: boolean; suppressed: boolean; login?: string; avatarUrl?: string };
+  active: "oauth" | "cli" | null;
+}
+
 interface GitHubContextValue {
   /* Connection */
   connected: boolean;
   connecting: boolean;
   loading: boolean;
   mode: GitHubMode;
+  sources: GitHubSources | null;
   connect: () => Promise<void>;
-  disconnect: () => Promise<void>;
+  disconnect: (source?: "oauth" | "cli" | "all") => Promise<void>;
 
   /* CLI / Device flow */
   cliAction: CliAction | null;
@@ -103,6 +115,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
                       (initialData?.mode || "cloud");
 
   const [mode, setMode] = useState<GitHubMode>(initialMode as GitHubMode);
+  const [sources, setSources] = useState<GitHubSources | null>(initialData?.sources ?? null);
   const [cliAction, setCliAction] = useState<CliAction | null>(null);
   const [accounts, setAccounts] = useState<GitHubAccount[]>(initialData?.accounts || []);
   const [userLogin, setUserLogin] = useState(initialData?.status?.login || "");
@@ -128,6 +141,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
       if (res?.selfHosted !== undefined) setSelfHosted(res.selfHosted);
       if (res?.installUrl) setInstallUrl(res.installUrl);
       else setInstallUrl(null);
+      setSources(res?.sources ?? null);
       if (res?.status?.connected) {
         setConnected(true);
         setCliAction(null);
@@ -219,19 +233,30 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
   }, [refresh]);
 
   /* ── Disconnect GitHub ──────────────────────────────────────── */
-  const disconnect = useCallback(async () => {
-    try {
-      await githubApi.disconnect();
-      setConnected(false);
-      setAccounts([]);
-      setRepos([]);
-      setUserLogin("");
-      setSelectedOwnerState("");
-      setCliAction(null);
-    } catch {
-      /* silent */
-    }
-  }, []);
+  const disconnect = useCallback(
+    async (source: "oauth" | "cli" | "all" = "all") => {
+      try {
+        await githubApi.disconnect(source);
+        // In cli mode with both sources, refresh the per-source snapshot —
+        // the user may still have the other source connected. In all other
+        // cases this resolves to fully disconnected.
+        if (mode === "cli" && source !== "all") {
+          await refresh();
+        } else {
+          setConnected(false);
+          setAccounts([]);
+          setRepos([]);
+          setUserLogin("");
+          setSelectedOwnerState("");
+          setCliAction(null);
+          setSources(null);
+        }
+      } catch {
+        /* silent */
+      }
+    },
+    [mode, refresh],
+  );
 
   /* ── Device flow polling ────────────────────────────────────── */
   useEffect(() => {
@@ -294,6 +319,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
         connecting,
         loading,
         mode,
+        sources,
         connect,
         disconnect,
         cliAction,

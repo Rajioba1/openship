@@ -14,12 +14,35 @@
 import React, { useCallback, useState } from "react";
 import { Boxes, ChevronDown, ChevronRight, Layers } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
+import { usePlatform } from "@/context/PlatformContext";
 import { MonorepoAppProvider } from "@/context/deployment/MonorepoAppProvider";
 import type { MonorepoAppConfig } from "@/context/deployment/types";
+import { Checkbox } from "@/components/ui/Checkbox";
 import { getFrameworkConfig } from "./Frameworks";
 import ProjectSettings from "./ProjectSettings";
 import BuildSettings from "./BuildSettings";
 import EnvironmentVariables from "./EnvironmentVariables";
+
+/**
+ * Resolve a default free-subdomain label for a monorepo sub-app, used to
+ * preview the URL in the row header before deploy. If the user has
+ * already set a custom label on the sub-app's first endpoint we honor it;
+ * otherwise we fall back to "<app-name>-<project-slug>" so each sub-app
+ * gets a visibly distinct host that matches what the backend will mint
+ * at deploy time.
+ */
+function previewSubAppHost(app: MonorepoAppConfig, projectName: string, baseDomain: string): string | null {
+  if (!baseDomain) return null;
+  const ep = app.publicEndpoints?.[0];
+  if (ep?.domainType === "custom" && ep.customDomain) {
+    return ep.customDomain;
+  }
+  const slugify = (v: string) =>
+    v.toLowerCase().replace(/^@/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const label = ep?.domain || `${slugify(app.name)}-${slugify(projectName || "app")}`;
+  if (!label) return null;
+  return `${label}.${baseDomain}`;
+}
 
 const WorkspaceCard: React.FC = () => {
   const { config, updateConfig } = useDeployment();
@@ -73,8 +96,13 @@ const WorkspaceCard: React.FC = () => {
 
 const AppCard: React.FC<{ app: MonorepoAppConfig; index: number }> = ({ app, index }) => {
   const { config, updateConfig } = useDeployment();
+  const { baseDomain } = usePlatform();
   const apps = config.monorepoApps ?? [];
-  const [expanded, setExpanded] = useState(index < 2); // first two open by default
+  // Only the first sub-app expands on mount. Operators usually deal with
+  // sub-apps one at a time — opening N at once makes the page very tall
+  // and most of those cards stay scrolled past. Each card is one click
+  // away from its details via the chevron.
+  const [expanded, setExpanded] = useState(index === 0);
   const frameworkConfig = getFrameworkConfig(app.framework);
 
   const setEnabled = useCallback(
@@ -85,6 +113,13 @@ const AppCard: React.FC<{ app: MonorepoAppConfig; index: number }> = ({ app, ind
     },
     [apps, app, index, updateConfig],
   );
+
+  // Preview the host this sub-app will be served on — same logic the
+  // deploy backend uses to mint the default free subdomain. Lets the
+  // operator see "→ apps-dashboard-diavira.opsh.io" right in the row
+  // header without having to expand the card or look at the right
+  // sidebar (which still only shows the PROJECT-level endpoint).
+  const previewHost = previewSubAppHost(app, config.projectName ?? "", baseDomain);
 
   return (
     <div className={`bg-card rounded-2xl border ${app.enabled ? "border-border/50" : "border-border/30 opacity-70"} overflow-hidden`}>
@@ -108,26 +143,41 @@ const AppCard: React.FC<{ app: MonorepoAppConfig; index: number }> = ({ app, ind
             <h4 className="text-[15px] font-semibold text-foreground truncate">{app.name}</h4>
             <span className="text-xs text-muted-foreground truncate">{app.rootDirectory}</span>
           </div>
-          <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+          <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground flex-wrap">
             <span>{frameworkConfig.name}</span>
             {app.port && <span>· port {app.port}</span>}
             {app.packageManager && <span>· {app.packageManager}</span>}
+            {/* Preview domain — only when this sub-app is actually going
+                to deploy (enabled) AND we can compute a host. Disabled
+                apps render the metadata greyed without the URL so it's
+                obvious the host isn't being claimed. */}
+            {app.enabled && previewHost && (
+              <>
+                <span className="text-muted-foreground/50">→</span>
+                <span className="text-foreground/80 truncate">{previewHost}</span>
+              </>
+            )}
           </div>
         </div>
 
         <label className="flex items-center gap-2 cursor-pointer select-none">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={app.enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-            className="w-4 h-4 rounded border-border/60 text-primary focus:ring-primary/30"
+            onCheckedChange={setEnabled}
+            aria-label="Deploy this sub-app"
           />
           <span className="text-xs text-muted-foreground">Deploy</span>
         </label>
       </div>
 
-      {/* Expanded body — uses the existing single-app form components, but
-          scoped to this sub-app via MonorepoAppProvider. */}
+      {/* Expanded body — single-app form components scoped to this
+          sub-app via MonorepoAppProvider. Domain control lives only in
+          the right sidebar's <PublicEndpointsCard>, which renders one
+          card per sub-app from the seeded `config.publicEndpoints`. We
+          deliberately do NOT render a domain editor inline here — that
+          would duplicate the same field in two places and the two
+          slices (project-level publicEndpoints vs sub-app slice) would
+          drift apart on edit. One canonical surface, no duplication. */}
       {expanded && app.enabled && (
         <div className="border-t border-border/40 bg-muted/10 px-5 py-5 space-y-5">
           <MonorepoAppProvider index={index}>

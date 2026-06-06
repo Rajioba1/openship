@@ -37,7 +37,8 @@ import {
 } from "../../../lib/routing-domains";
 import { ensureManagedEdgeProxy } from "../../../lib/managed-edge-proxy";
 import * as sessionManager from "../session-manager";
-import { parseServicePort } from "./domain-helpers";
+import { resolveServicePort } from "./domain-helpers";
+import { serviceKind } from "./project-services";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -99,11 +100,7 @@ function topoSort(services: Service[]): Service[] {
 
 function resolveServicePublicPort(service: Service): number | undefined {
   if (!service.exposed) return undefined;
-  return (
-    parseServicePort(service.exposedPort ?? undefined) ??
-    parseServicePort(((service.ports as string[]) ?? [])[0]) ??
-    undefined
-  );
+  return resolveServicePort(service) ?? undefined;
 }
 
 function resolveServicePublicSlug(project: Project, service: Service): string | undefined {
@@ -112,6 +109,7 @@ function resolveServicePublicSlug(project: Project, service: Service): string | 
     project.slug ?? project.name,
     service.name,
     service.domain ?? undefined,
+    serviceKind(service),
   );
 }
 
@@ -159,6 +157,12 @@ function createServiceRuntimeConfig(opts: {
   resources?: ResourceConfig;
 }): MultiServiceDeployConfig {
   const { project, dep, service, image, environment, resources } = opts;
+  // Monorepo sub-apps store their long-running process in `startCommand`;
+  // compose services in `command`. The DB invariant is that compose rows
+  // never have `startCommand` set, so a single `??` chain covers both:
+  // monorepo → startCommand (with command fallback if missing), compose →
+  // command. No branching on kind needed.
+  const runtimeCommand = service.startCommand ?? service.command ?? undefined;
   return {
     deploymentId: dep.id,
     projectId: project.id,
@@ -168,7 +172,7 @@ function createServiceRuntimeConfig(opts: {
     ports: (service.ports as string[]) ?? [],
     environment,
     volumes: (service.volumes as string[]) ?? [],
-    command: service.command ?? undefined,
+    command: runtimeCommand,
     restart: service.restart ?? "unless-stopped",
     resources,
     expose: service.exposed,
@@ -192,6 +196,13 @@ function createServiceDeployConfig(opts: {
   const publicSlug = resolveServicePublicSlug(project, service);
   const customDomain = resolveServiceCustomDomain(service);
 
+  // Monorepo sub-apps carry their own framework + startCommand on the row;
+  // compose rows have those columns null. A direct `??` chain falls through
+  // cleanly in both cases — monorepo rows hit the service-level value,
+  // compose rows skip straight to the project / command fallback.
+  const stack = service.framework ?? project.framework ?? undefined;
+  const startCommand = service.startCommand ?? service.command ?? undefined;
+
   return {
     deploymentId: dep.id,
     projectId: project.id,
@@ -199,8 +210,8 @@ function createServiceDeployConfig(opts: {
     imageRef: image,
     environment: dep.environment,
     port: resolveServicePublicPort(service) ?? 0,
-    startCommand: service.command ?? undefined,
-    stack: project.framework ?? undefined,
+    startCommand,
+    stack,
     envVars: environment,
     resources: resources ?? DEFAULT_RESOURCE_CONFIG,
     restartPolicy: toDeployRestartPolicy(service.restart ?? undefined),

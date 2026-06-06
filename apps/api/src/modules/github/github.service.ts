@@ -680,8 +680,39 @@ export async function getUserHome(userId: string) {
   // In cli mode, include local gh CLI status
   const localStatus = mode === "cli" ? await getLocalGhStatus() : undefined;
 
+  // Per-source snapshot (cli mode only). Lets the dashboard render the
+  // Openship App / gh CLI panels independently with their own state, instead
+  // of the legacy "whichever resolved first wins" status. `oauthConnected`
+  // is derived from getUserStatus; `cliAvailable` reflects the host's `gh`
+  // CLI minus any user suppression flag.
+  let sources: undefined | {
+    oauth: { connected: boolean; login?: string; avatarUrl?: string };
+    cli: { available: boolean; suppressed: boolean; login?: string; avatarUrl?: string };
+    active: "oauth" | "cli" | null;
+  };
+  if (mode === "cli") {
+    const { isGithubCliDisabled } = await import("../settings/settings.service");
+    const cliSuppressed = await isGithubCliDisabled(userId);
+    const oauthLogin = status.connected && status.tokenSource === "oauth" ? status.login : undefined;
+    const oauthAvatar = status.connected && status.tokenSource === "oauth" ? status.avatar_url : undefined;
+    sources = {
+      oauth: {
+        connected: status.connected && status.tokenSource === "oauth",
+        login: oauthLogin,
+        avatarUrl: oauthAvatar,
+      },
+      cli: {
+        available: !!localStatus?.available && !cliSuppressed,
+        suppressed: cliSuppressed,
+        login: localStatus?.available ? localStatus.login : undefined,
+        avatarUrl: localStatus?.available ? localStatus.avatar_url : undefined,
+      },
+      active: status.connected ? (status.tokenSource === "oauth" ? "oauth" : "cli") : null,
+    };
+  }
+
   if (!status.connected) {
-    return { status, repos: [] as MappedRepository[], accounts: [] as MappedAccount[], mode, localStatus };
+    return { status, repos: [] as MappedRepository[], accounts: [] as MappedAccount[], mode, localStatus, sources };
   }
 
   if (mode !== "app") {
@@ -712,7 +743,7 @@ export async function getUserHome(userId: string) {
       }
     } catch { /* empty */ }
 
-    return { status, repos, accounts, mode, localStatus };
+    return { status, repos, accounts, mode, localStatus, sources };
   }
 
   // App mode: use GitHub App installations
@@ -733,7 +764,7 @@ export async function getUserHome(userId: string) {
     console.warn("[GitHub] Failed to fetch installations/repos:", (err as Error).message);
   }
 
-  return { status, repos, accounts, mode, localStatus };
+  return { status, repos, accounts, mode, localStatus, sources };
 }
 
 // ─── Webhook strategy ────────────────────────────────────────────────────────

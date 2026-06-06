@@ -1,14 +1,19 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Check,
   ChevronDown,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   GitBranch,
   GitCommit,
   Globe,
   Github,
+  Key,
   Loader2,
+  Trash2,
   Webhook,
   Zap,
 } from "lucide-react";
@@ -32,6 +37,66 @@ export const GitSettings = () => {
   const [isSettingDomain, setIsSettingDomain] = useState(false);
   const [showDomainMenu, setShowDomainMenu] = useState(false);
   const hasRefreshed = useRef(false);
+
+  /* ── Per-project clone-token override ─────────────────────────── */
+  const [cloneToken, setCloneToken] = useState<{ hasToken: boolean; setAt: string | null } | null>(null);
+  const [cloneTokenLoading, setCloneTokenLoading] = useState(false);
+  const [cloneTokenInput, setCloneTokenInput] = useState("");
+  const [showCloneToken, setShowCloneToken] = useState(false);
+  const [editingCloneToken, setEditingCloneToken] = useState(false);
+  const [savingCloneToken, setSavingCloneToken] = useState(false);
+
+  const refreshCloneToken = useCallback(async () => {
+    if (!id) return;
+    setCloneTokenLoading(true);
+    try {
+      const res = await projectsApi.getCloneToken(id);
+      setCloneToken(res);
+    } catch {
+      setCloneToken({ hasToken: false, setAt: null });
+    } finally {
+      setCloneTokenLoading(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    void refreshCloneToken();
+  }, [refreshCloneToken]);
+
+  const saveCloneToken = async () => {
+    const trimmed = cloneTokenInput.trim();
+    if (!trimmed) {
+      showToast("Paste a token before saving", "error", "Clone token");
+      return;
+    }
+    setSavingCloneToken(true);
+    try {
+      const res = await projectsApi.updateCloneToken(id, { token: trimmed });
+      setCloneToken(res);
+      setCloneTokenInput("");
+      setEditingCloneToken(false);
+      showToast("Project clone token saved", "success", "Clone token");
+    } catch (error) {
+      showToast(getApiErrorMessage(error, "Failed to save token"), "error", "Clone token");
+    } finally {
+      setSavingCloneToken(false);
+    }
+  };
+
+  const clearCloneToken = async () => {
+    setSavingCloneToken(true);
+    try {
+      const res = await projectsApi.updateCloneToken(id, { token: null });
+      setCloneToken(res);
+      setCloneTokenInput("");
+      setEditingCloneToken(false);
+      showToast("Project clone token cleared", "success", "Clone token");
+    } catch (error) {
+      showToast(getApiErrorMessage(error, "Failed to clear token"), "error", "Clone token");
+    } finally {
+      setSavingCloneToken(false);
+    }
+  };
 
   useEffect(() => {
     if (!hasRefreshed.current) {
@@ -434,6 +499,96 @@ export const GitSettings = () => {
                 <ExternalLink className="size-3.5" />
               </a>
             </>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="Clone Token Override"
+          description="Project-scoped token used by the clone module before falling back to your global token or the GitHub App"
+          icon={Key}
+          iconTone="primary"
+        >
+          {cloneTokenLoading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Loading…
+            </div>
+          ) : (!cloneToken?.hasToken || editingCloneToken) ? (
+            <div className="space-y-2.5">
+              <p className="text-[13px] text-muted-foreground">
+                Paste a GitHub PAT here to use ONLY for this project. Highest priority in the clone chain — overrides your settings-level token and the GitHub App.
+              </p>
+              <div className="relative">
+                <input
+                  type={showCloneToken ? "text" : "password"}
+                  value={cloneTokenInput}
+                  onChange={(e) => setCloneTokenInput(e.target.value)}
+                  placeholder="ghp_… or github_pat_…"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="h-10 w-full rounded-xl border border-border/50 bg-muted/20 px-3 pr-10 text-sm font-mono text-foreground outline-none transition-colors focus:border-primary/40"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCloneToken((s) => !s)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 size-7 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors"
+                  aria-label={showCloneToken ? "Hide token" : "Show token"}
+                >
+                  {showCloneToken ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={saveCloneToken}
+                  disabled={savingCloneToken || !cloneTokenInput.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-foreground px-3.5 py-2 text-[13px] font-medium text-background transition-colors hover:bg-foreground/90 disabled:opacity-50"
+                >
+                  {savingCloneToken ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+                  Save token
+                </button>
+                {editingCloneToken && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingCloneToken(false);
+                      setCloneTokenInput("");
+                    }}
+                    disabled={savingCloneToken}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-foreground/[0.06] px-3.5 py-2 text-[13px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1]"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-border/50 bg-muted/15 p-3.5 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-foreground">Token saved for this project</p>
+                <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+                  Last updated {cloneToken.setAt ? new Date(cloneToken.setAt).toLocaleString() : "just now"}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setEditingCloneToken(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-foreground/[0.06] px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1]"
+                >
+                  Replace
+                </button>
+                <button
+                  type="button"
+                  onClick={clearCloneToken}
+                  disabled={savingCloneToken}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-500/10 px-3 py-1.5 text-[12px] font-medium text-red-600 transition-colors hover:bg-red-500/20 dark:text-red-400 disabled:opacity-50"
+                >
+                  <Trash2 className="size-3" />
+                  Clear
+                </button>
+              </div>
+            </div>
           )}
         </SectionCard>
       </div>

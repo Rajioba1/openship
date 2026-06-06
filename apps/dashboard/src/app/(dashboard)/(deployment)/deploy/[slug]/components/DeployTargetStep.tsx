@@ -26,6 +26,8 @@ interface OptionCardProps {
   description: string;
   /** Optional children rendered below when selected */
   children?: React.ReactNode;
+  /** Extra classes for the outer wrapper — e.g. `h-full` for equal-height grids. */
+  className?: string;
 }
 
 export const OptionCard: React.FC<OptionCardProps> = ({
@@ -35,13 +37,14 @@ export const OptionCard: React.FC<OptionCardProps> = ({
   label,
   description,
   children,
+  className,
 }) => (
-  <div>
+  <div className={className}>
     <button
       type="button"
       onClick={onSelect}
       className={`
-        relative w-full text-left p-4 rounded-xl border transition-all
+        relative w-full h-full text-left p-4 rounded-xl border transition-all
         ${selected
           ? "border-primary bg-primary/5 ring-1 ring-primary/20"
           : "border-border/50 bg-card hover:border-primary/30 hover:bg-primary/[0.02]"
@@ -220,7 +223,7 @@ export function useDesktopTargets(): ResolvedTargets {
 
     let cancelled = false;
     systemApi.listServers()
-      .then((list) => { if (!cancelled) setServers(list.filter((s) => s.runsApps)); })
+      .then((list) => { if (!cancelled) setServers(list); })
       .catch(() => {})
       .finally(() => { if (!cancelled) setServersReady(true); });
     return () => { cancelled = true; };
@@ -424,10 +427,13 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
           }
         }
 
-        // Collapse to compact summary only when defaults applied cleanly.
-        // Without a default — or with a stale serverId — keep the full
-        // picker so the user can make a fresh choice.
-        if (applied) setExpanded(false);
+        // Collapse to compact summary only when defaults applied cleanly
+        // AND we're not coming back here on purpose. `autoSkipAllowed=false`
+        // means the user clicked the edit affordance on the next step to
+        // come back and change something — landing them on the compact pill
+        // would force an extra click on the pencil to actually edit. Skip
+        // the collapse so they see the full picker right away.
+        if (applied && autoSkipAllowed) setExpanded(false);
       })
       .catch(() => { /* no default — picker falls back to auto-select */ })
       .finally(() => { if (!cancelled) setDefaultsLoaded(true); });
@@ -453,11 +459,31 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
     }
   }, [ready, hasChoice, hasServers, hasCloudOption, servers, updateConfig]);
 
+  // When switching TO cloud, default the build strategy to "server" (cloud
+  // build is the recommended path). But don't force-override on every render
+  // — that would prevent the user from picking "local build → cloud deploy"
+  // as a cost-saving option for stacks that support it (Next.js, Vite, etc.).
+  // Static-app stacks (no hasBuild) have nothing to transfer, so we still
+  // force them to server-build.
+  const prevDeployTargetRef = useRef(config.deployTarget);
   useEffect(() => {
-    if (config.deployTarget === "cloud" && config.buildStrategy !== "server") {
+    const justSwitchedToCloud =
+      prevDeployTargetRef.current !== "cloud" && config.deployTarget === "cloud";
+    prevDeployTargetRef.current = config.deployTarget;
+    if (justSwitchedToCloud && config.buildStrategy !== "server") {
+      updateConfig({ buildStrategy: "server" });
+      return;
+    }
+    // Always force server-build when the stack can't produce a transferable
+    // artifact — local-build would have nothing to ship to cloud.
+    if (
+      config.deployTarget === "cloud" &&
+      config.buildStrategy === "local" &&
+      config.options?.hasBuild !== true
+    ) {
       updateConfig({ buildStrategy: "server" });
     }
-  }, [config.deployTarget, config.buildStrategy, updateConfig]);
+  }, [config.deployTarget, config.buildStrategy, config.options?.hasBuild, updateConfig]);
 
   // Auto-select single server
   useEffect(() => {
@@ -548,13 +574,37 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
       description: "Build on the deploy target. Best when your machine has limited resources.",
     },
   ];
+  // For cloud deploys, building locally is a valid cost-saving path when the
+  // stack produces a transferable build artifact (Next.js .next, Vite dist,
+  // etc.). We charge for cloud build minutes; doing the build on the user's
+  // machine and only shipping the output to cloud skips that cost.
+  //
+  // NOT default — cloud-on-cloud stays the recommended choice. Building
+  // locally requires the same toolchain the cloud would use (Node version,
+  // pnpm/bun/etc.) and is environment-sensitive, so we surface it as an
+  // opt-in option, not the first card. Static-app stacks (no `hasBuild`)
+  // can't use local-build because there's no artifact to transfer; skip.
+  const cloudSupportsLocalBuild = config.options?.hasBuild === true;
   const visibleBuildOptions = config.deployTarget === "cloud"
-    ? [{
-        value: "server" as const,
-        icon: <Cloud className="size-5" />,
-        label: "Openship Cloud",
-        description: "Build in managed cloud infrastructure.",
-      }]
+    ? [
+        {
+          value: "server" as const,
+          icon: <Cloud className="size-5" />,
+          label: "Openship Cloud",
+          description: "Build in managed cloud infrastructure. Recommended.",
+        },
+        ...(cloudSupportsLocalBuild
+          ? [
+              {
+                value: "local" as const,
+                icon: <Cpu className="size-5" />,
+                label: "This Machine",
+                description:
+                  "Build locally and ship only the output. Saves cloud build minutes when you have a capable machine.",
+              },
+            ]
+          : []),
+      ]
     : buildOptions;
 
   const hasAnyDeployTarget = deployTargetOptions.length > 0;

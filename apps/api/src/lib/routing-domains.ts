@@ -2,6 +2,7 @@ import { repos, type Domain, type Project, type Service } from "@repo/db";
 import type { RoutedDomainInput, SslProvider } from "@repo/adapters";
 import { SYSTEM, resolveServiceHostnameLabel } from "@repo/core";
 import { env } from "../config/env";
+import { resolveServicePort, serviceKind } from "./deployable-service";
 
 export interface PlannedRouteDomain {
   hostname: string;
@@ -150,12 +151,19 @@ export function buildServiceRouteDomain(opts: {
   const { project, service, runtimeName, usesManagedRouting } = opts;
   if (!service.exposed) return null;
 
-  const targetPort = service.exposedPort ? Number(service.exposedPort) : undefined;
+  // Use the canonical port resolver so we honor `ports[]` too — not just
+  // `exposedPort`. The previous Number() coercion silently produced NaN
+  // for compose-style "host:container" strings.
+  const resolvedPort = resolveServicePort(service);
+  const targetPort = resolvedPort ?? undefined;
 
+  // Monorepo sub-apps always get a namespaced hostname (`<project>-<app>`).
+  // Compose services keep the "frontend"/"web"/"app" → bare-project-label
+  // shortcut for backward compat. See defaultServiceHostnameLabel for why.
   const hostname = service.domainType === "custom"
     ? service.customDomain?.trim().toLowerCase()
     : usesManagedRouting
-      ? `${resolveServiceHostnameLabel(project.slug ?? project.name, service.name, service.domain)}.${getRoutingBaseDomain()}`
+      ? `${resolveServiceHostnameLabel(project.slug ?? project.name, service.name, service.domain, serviceKind(service))}.${getRoutingBaseDomain()}`
       : null;
 
   if (!hostname) return null;

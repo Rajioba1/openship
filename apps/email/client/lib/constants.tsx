@@ -8,7 +8,16 @@ export const SIDEBAR_WIDTH = '14rem';
 export const SIDEBAR_WIDTH_MOBILE = '14rem';
 export const SIDEBAR_WIDTH_ICON = '3rem';
 export const SIDEBAR_KEYBOARD_SHORTCUT = 'b';
-export const BASE_URL = import.meta.env.VITE_PUBLIC_APP_URL;
+/**
+ * App URL — used only for "is this URL internal?" checks in the sidebar.
+ * Runtime same-origin: whatever the browser loaded us from. No env, no
+ * build-time baking. SSR fallback is '' (no internal-URL checks happen
+ * before hydration anyway).
+ */
+export const BASE_URL =
+  typeof window !== 'undefined' && window.location?.origin
+    ? window.location.origin
+    : '';
 export const MAX_URL_LENGTH = 2000;
 export const CACHE_BURST_KEY = 'cache-burst:v0.0.5';
 

@@ -151,10 +151,17 @@ export function Sidebar() {
               <Moon className="size-4" />
             )}
           </button>
+          {/* Sidebar collapse — disabled. The collapsed layout is currently
+              missing visual states for several nav items, so the toggle is
+              non-functional pending a design pass. Keeping the button in
+              the DOM (in a disabled state) preserves the layout grid and
+              the spot for re-enabling later without a layout shift. */}
           <button
-            onClick={() => setCollapsed((c) => !c)}
-            className="flex size-8 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+            type="button"
+            disabled
             aria-label={collapsed ? t.dashboard.sidebar.expand : t.dashboard.sidebar.collapse}
+            aria-disabled="true"
+            className="flex size-8 items-center justify-center rounded-xl text-muted-foreground/40 cursor-not-allowed"
           >
             {collapsed ? (
               <PanelLeftOpen className="size-4" />

@@ -38,8 +38,7 @@ export function DeployDefaults() {
       ]);
       setTarget(res?.defaultDeployTarget ?? null);
       setServerId(res?.defaultServerId ?? null);
-      // Only servers that can run apps are eligible deploy targets.
-      setServers(serverList.filter((s) => s.runsApps));
+      setServers(serverList);
     } catch {
       /* silent */
     } finally {

@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
-import { getApiErrorMessage, projectsApi, deployApi, servicesApi, type Service } from "@/lib/api";
+import { getApiErrorMessage, projectsApi, deployApi, serviceKind, servicesApi, type Service, type ServiceInput } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { resolveServiceHostnameLabel } from "@repo/core";
@@ -516,7 +516,7 @@ export const DomainSettings = () => {
     if (service.domainType === "custom" && service.customDomain) {
       return service.customDomain;
     }
-    return `${resolveServiceHostnameLabel(projectLabel, service.name, service.domain)}.${baseDomain}`;
+    return `${resolveServiceHostnameLabel(projectLabel, service.name, service.domain, serviceKind(service))}.${baseDomain}`;
   };
 
   const getServiceRouteSummary = (service: Service) => {
@@ -551,7 +551,7 @@ export const DomainSettings = () => {
     };
   };
 
-  const handleServiceRouteUpdate = async (serviceId: string, patch: Partial<Service>) => {
+  const handleServiceRouteUpdate = async (serviceId: string, patch: Partial<ServiceInput>) => {
     setRouteSavingServiceId(serviceId);
     try {
       const result = await servicesApi.update(id, serviceId, patch);
@@ -856,10 +856,20 @@ export const DomainSettings = () => {
         </div>
       )}
 
-      {!hasProjectLevelRouting && (servicesLoading || services.length > 0) && (
+      {!hasProjectLevelRouting && (servicesLoading || services.length > 0) && (() => {
+        // Only show ENABLED services (and their associated domains). When
+        // the operator disables a sub-app from the Services tab, its
+        // routing row hides from this Domains view automatically — the
+        // domain isn't being routed to anything, so showing it as if it
+        // were "available" would mislead. The disabled service is still
+        // editable from the Services tab; if it's re-enabled it reappears
+        // here on the next render.
+        const visibleServices = services.filter((s) => s.enabled);
+        const visibleExposedCount = visibleServices.filter((s) => s.exposed).length;
+        return (
         <SectionCard
           title="Service Routing"
-          description={`${services.filter((s) => s.exposed).length} of ${services.length} services exposed publicly`}
+          description={`${visibleExposedCount} of ${visibleServices.length} services exposed publicly`}
           icon={Container}
           iconTone="primary"
         >
@@ -867,13 +877,15 @@ export const DomainSettings = () => {
             <div className="py-8 text-center text-sm text-muted-foreground">
               Loading services...
             </div>
-          ) : services.length === 0 ? (
+          ) : visibleServices.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
-              No services found for this project.
+              {services.length === 0
+                ? "No services found for this project."
+                : "All services are disabled — enable one from the Services tab to see its routing."}
             </div>
           ) : (
             <div className="overflow-hidden rounded-xl border border-border/40 divide-y divide-border/30">
-              {services.map((service) => {
+              {visibleServices.map((service) => {
                 const route = getServiceRouteSummary(service);
                 const isServiceSaving = routeSavingServiceId === service.id;
                 const routeLabel = route.liveUrl
@@ -960,7 +972,8 @@ export const DomainSettings = () => {
             </div>
           )}
         </SectionCard>
-      )}
+        );
+      })()}
 
       {editingRouteService && editingRoute && (
         <div

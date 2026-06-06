@@ -809,7 +809,7 @@ const MailDisplay = ({ emailData, index, totalEmails, demo, threadAttachments }:
             }
 
             body {
-              font-family: Arial, sans-serif;
+              font-family: 'Gellix', 'SF Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
               line-height: 1.5;
               color: #333;
               background: white;

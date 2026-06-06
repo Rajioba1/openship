@@ -9,13 +9,39 @@ import { STACK_IDS, ALL_PACKAGE_MANAGERS } from "@repo/core";
 
 // ─── Shared enums (derived from registry) ────────────────────────────────────
 
-const FrameworkEnum = Type.Union(
+export const FrameworkEnum = Type.Union(
   STACK_IDS.map((id) => Type.Literal(id)) as [TLiteral<string>, ...TLiteral<string>[]],
 );
 
-const PackageManagerEnum = Type.Union(
+export const PackageManagerEnum = Type.Union(
   ALL_PACKAGE_MANAGERS.map((pm) => Type.Literal(pm)) as [TLiteral<string>, ...TLiteral<string>[]],
 );
+
+/**
+ * Validator block for "this row is a source-built monorepo sub-app."
+ *
+ * Same field set lives in three places — the DB `service` row (nullable
+ * columns), the create-time `MonorepoAppSchema` used inside the project
+ * create body, and the per-service `UpdateServiceBody` (when a sub-app
+ * row is edited after creation). Define the block ONCE here and reuse it
+ * in every callsite so a field added (or maxLength tweaked) doesn't drift
+ * silently across schemas.
+ *
+ * `rootDirectory` is OPTIONAL at this layer because the DB column is
+ * nullable (compose rows live in the same table with null monorepo
+ * fields). The create-time wrappers below make it required where the
+ * payload is explicitly a new monorepo sub-app.
+ */
+export const MonorepoSubAppFieldsSchema = {
+  rootDirectory: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+  installCommand: Type.Optional(Type.String({ maxLength: 1000 })),
+  buildCommand: Type.Optional(Type.String({ maxLength: 1000 })),
+  startCommand: Type.Optional(Type.String({ maxLength: 1000 })),
+  outputDirectory: Type.Optional(Type.String({ maxLength: 200 })),
+  framework: Type.Optional(FrameworkEnum),
+  packageManager: Type.Optional(PackageManagerEnum),
+  buildImage: Type.Optional(Type.String({ maxLength: 200 })),
+} as const;
 
 const EnvironmentEnum = Type.Union([
   Type.Literal("production"),
@@ -38,17 +64,25 @@ const PublicEndpointSchema = Type.Object({
   domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
 });
 
-/** One sub-app inside a monorepo project. */
+/**
+ * One sub-app inside a monorepo project — used inside CreateProjectBody.
+ * Reuses MonorepoSubAppFieldsSchema for the build settings so any change
+ * to that block ripples to both this create payload and the per-service
+ * update validator.
+ *
+ * `rootDirectory` is re-declared as required here (the shared block has
+ * it optional to match the DB), because the dashboard's discovery flow
+ * always produces a rootDirectory and we want preflight to reject an
+ * empty one rather than fall back to repo root by accident.
+ */
 const MonorepoAppSchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 100 }),
+  // Spread first, then override rootDirectory to required. The shared
+  // block has it Optional to match the DB column; this create payload
+  // requires it so preflight rejects empty paths instead of silently
+  // falling back to repo root.
+  ...MonorepoSubAppFieldsSchema,
   rootDirectory: Type.String({ minLength: 1, maxLength: 200 }),
-  framework: Type.Optional(FrameworkEnum),
-  packageManager: Type.Optional(PackageManagerEnum),
-  buildImage: Type.Optional(Type.String({ maxLength: 200 })),
-  installCommand: Type.Optional(Type.String({ maxLength: 500 })),
-  buildCommand: Type.Optional(Type.String({ maxLength: 500 })),
-  startCommand: Type.Optional(Type.String({ maxLength: 500 })),
-  outputDirectory: Type.Optional(Type.String({ maxLength: 200 })),
   port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
   enabled: Type.Optional(Type.Boolean({ default: true })),
   exposed: Type.Optional(Type.Boolean({ default: true })),

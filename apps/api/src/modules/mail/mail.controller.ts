@@ -248,6 +248,94 @@ export async function getStatus(c: Context) {
 }
 
 /**
+ * GET /mail/servers — list every server openship has provisioned (or is
+ * provisioning) the mail stack on.
+ *
+ * Reads from the `mail_servers` table — the single source of truth in
+ * openship's DB. Fast (one query, no SSH), survives unreachable hosts,
+ * and stays consistent with the install lifecycle (rows inserted on
+ * install start, stamped on completion, removed on reset).
+ *
+ * Backfill: if the table is empty, we one-time SSH-scan all servers for
+ * `mail-state.json` files written by older installs that predate this
+ * table, and import them. After the first /emails load post-upgrade,
+ * subsequent loads are pure DB reads.
+ *
+ * Result shape per row:
+ *   { id, name, host, port, user, domain, completed, active }
+ *
+ *   - `completed` = `installedAt` is set on the mail_servers row
+ *   - `active`    = an install is currently running against this server
+ *                   in THIS API process (in-memory flag)
+ */
+export async function listMailServers(c: Context) {
+  if (env.CLOUD_MODE) return c.json({ servers: [] });
+
+  let mailRows = await repos.mailServer.list();
+
+  // One-time backfill for installs that predate the mail_servers table.
+  // Only runs when the table is empty — otherwise the table is canonical
+  // and we never SSH-scan again.
+  if (mailRows.length === 0) {
+    const all = await repos.server.list();
+    const scanned = await Promise.all(
+      all.map(async (s) => {
+        try {
+          const state = await sshManager.withExecutor(s.id, (exec) => readState(exec));
+          if (!state?.domain) return null;
+          const completed =
+            MAIL_SETUP_STEPS.length > 0 &&
+            MAIL_SETUP_STEPS.every(
+              (step) => state.completedSteps[String(step.id)]?.success === true,
+            );
+          return { serverId: s.id, domain: state.domain, completed };
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const found of scanned) {
+      if (!found) continue;
+      try {
+        await repos.mailServer.upsert({
+          serverId: found.serverId,
+          domain: found.domain,
+          installedAt: found.completed ? new Date() : null,
+        });
+      } catch (err) {
+        console.warn(
+          "[mail] backfill upsert failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    mailRows = await repos.mailServer.list();
+  }
+
+  // Join with the servers table to surface host/user/port for the UI.
+  const allServers = await repos.server.list();
+  const serverById = new Map(allServers.map((s) => [s.id, s]));
+  const out = mailRows
+    .map((row) => {
+      const s = serverById.get(row.serverId);
+      if (!s) return null; // FK CASCADE should prevent this, but guard anyway
+      return {
+        id: s.id,
+        name: s.name || s.sshHost,
+        host: s.sshHost,
+        port: s.sshPort ?? 22,
+        user: s.sshUser ?? "root",
+        domain: row.domain,
+        completed: row.installedAt !== null,
+        active: active?.serverId === s.id,
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
+
+  return c.json({ servers: out });
+}
+
+/**
  * If the state file's `dnsRecords` is missing the `a` (and optionally
  * `aaaa`) entries, derive them from openship's stored sshHost — either
  * it's already an IP literal, or it's a hostname we resolve via DNS.
@@ -398,6 +486,22 @@ export async function startSetup(c: Context) {
   }
 
   active = { serverId, domain, cancelled: false };
+
+  // Mark this server as a mail server in the openship DB the moment install
+  // begins. /emails reads from this table for its "which server is the mail
+  // server?" answer — recording it here means the user can navigate to
+  // /emails mid-install and land on the right server's progress UI without
+  // round-tripping SSH. The `installedAt` stamp is left null until completion.
+  try {
+    await repos.mailServer.upsert({ serverId, domain, installedAt: null });
+  } catch (err) {
+    console.warn(
+      "[mail] failed to record mail-server install start:",
+      err instanceof Error ? err.message : err,
+    );
+    // Non-fatal — install proceeds; /emails would just have to fall back to
+    // the SSH scan for this single edge case.
+  }
 
   return streamSSE(c, async (stream) => {
     // Resolve initial state from the server. New install → fresh state.
@@ -640,6 +744,20 @@ export async function startSetup(c: Context) {
       const finishedAt = new Date().toISOString();
       await halt({ resumeStep: null, errorMessage: null, finishedAt });
 
+      // Stamp installedAt now that the wizard hit its terminal success state.
+      // This is what flips the row from "in-progress" to "installed" for the
+      // /emails dashboard. Wrapped in try/catch — the install itself
+      // succeeded; a DB write failure here is a tracking issue, not a
+      // user-visible failure.
+      try {
+        await repos.mailServer.markInstalled(serverId, domain);
+      } catch (err) {
+        console.warn(
+          "[mail] failed to stamp installedAt on mail-server record:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+
       await stream.writeSSE({
         event: "complete",
         data: JSON.stringify({
@@ -775,6 +893,18 @@ export async function resetSetup(c: Context) {
     return c.json(
       { error: err instanceof Error ? err.message : "Reset failed" },
       500,
+    );
+  }
+  // Drop openship's record of "this server is a mail server" the moment the
+  // on-host state file goes. Best-effort — losing the row is recoverable on
+  // the next install start, but losing them out of sync would let /emails
+  // claim a stale mail server.
+  try {
+    await repos.mailServer.remove(serverId);
+  } catch (err) {
+    console.warn(
+      "[mail] failed to drop mail-server record after reset:",
+      err instanceof Error ? err.message : err,
     );
   }
   return c.json({ ok: true });

@@ -3,7 +3,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Loader2, Plus, Save, X } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
-import type { Service, ServiceInput } from "@/lib/api/services";
+import { Checkbox } from "@/components/ui/Checkbox";
+import { serviceKind, type Service, type ServiceInput } from "@/lib/api/services";
 import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
 import EnvironmentVariables from "@/components/import-project/EnvironmentVariables";
 
@@ -51,6 +52,12 @@ export function ServiceEditorModal({
   onClose,
   onSubmit,
 }: ServiceEditorModalProps) {
+  // Service kind determines which "source" fields the form shows:
+  //   compose  → image OR Dockerfile build
+  //   monorepo → rootDirectory + install/build/start commands (source build)
+  // Both kinds share env, ports, volumes, routing.
+  const isMonorepo = serviceKind(service) === "monorepo";
+
   const [name, setName] = useState("");
   const [sourceType, setSourceType] = useState<"image" | "build">("image");
   const [image, setImage] = useState("");
@@ -68,6 +75,15 @@ export function ServiceEditorModal({
   const [domain, setDomain] = useState("");
   const [customDomain, setCustomDomain] = useState("");
   const [domainType, setDomainType] = useState<"free" | "custom">("free");
+  // Monorepo build settings (only used when isMonorepo)
+  const [rootDirectory, setRootDirectory] = useState("");
+  const [framework, setFramework] = useState("");
+  const [packageManager, setPackageManager] = useState("");
+  const [buildImage, setBuildImage] = useState("");
+  const [installCommand, setInstallCommand] = useState("");
+  const [buildCommand, setBuildCommand] = useState("");
+  const [startCommand, setStartCommand] = useState("");
+  const [outputDirectory, setOutputDirectory] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -91,6 +107,14 @@ export function ServiceEditorModal({
     setDomain(service?.domain ?? "");
     setCustomDomain(service?.customDomain ?? "");
     setDomainType(service?.domainType === "custom" ? "custom" : "free");
+    setRootDirectory(service?.rootDirectory ?? "");
+    setFramework(service?.framework ?? "");
+    setPackageManager(service?.packageManager ?? "");
+    setBuildImage(service?.buildImage ?? "");
+    setInstallCommand(service?.installCommand ?? "");
+    setBuildCommand(service?.buildCommand ?? "");
+    setStartCommand(service?.startCommand ?? "");
+    setOutputDirectory(service?.outputDirectory ?? "");
     setError(null);
     setSaving(false);
   }, [open, service]);
@@ -106,38 +130,84 @@ export function ServiceEditorModal({
       return;
     }
 
-    if (sourceType === "image" && !image.trim()) {
-      setError("Add an image, or switch to Dockerfile build.");
-      return;
-    }
-
-    if (sourceType === "build" && !build.trim() && !dockerfile.trim()) {
-      setError("Add a build context or Dockerfile path.");
-      return;
+    // Per-kind required-field validation. Compose services need a source
+    // (image OR Dockerfile). Monorepo sub-apps need a rootDirectory + at
+    // least one of buildCommand / startCommand (the pipeline accepts
+    // run-only sub-apps that have no build step).
+    if (!isMonorepo) {
+      if (sourceType === "image" && !image.trim()) {
+        setError("Add an image, or switch to Dockerfile build.");
+        return;
+      }
+      if (sourceType === "build" && !build.trim() && !dockerfile.trim()) {
+        setError("Add a build context or Dockerfile path.");
+        return;
+      }
+    } else {
+      if (!rootDirectory.trim()) {
+        setError("Add a root directory (e.g. apps/web).");
+        return;
+      }
+      if (!buildCommand.trim() && !startCommand.trim()) {
+        setError("Add at least a build command or a start command.");
+        return;
+      }
     }
 
     setSaving(true);
     setError(null);
 
-    const payload: ServiceInput = {
-      name: trimmedName,
-      image: sourceType === "image" ? image.trim() : "",
-      build: sourceType === "build" ? build.trim() || "." : "",
-      dockerfile: sourceType === "build" ? dockerfile.trim() : "",
-      ports: portList,
-      dependsOn: splitList(dependsOn),
-      environment: envRecordFromRows(envRows),
-      volumes: splitList(volumes),
-      command: command.trim(),
-      restart,
-      enabled,
-      exposed,
-      exposedPort: exposed ? exposedPort.trim() || undefined : undefined,
-      domain: exposed && domainType === "free" ? domain.trim() || undefined : undefined,
-      customDomain:
-        exposed && domainType === "custom" ? customDomain.trim() || undefined : undefined,
-      domainType,
-    };
+    const payload: ServiceInput = isMonorepo
+      ? {
+          // Monorepo sub-app: source-built. No image/build/dockerfile —
+          // the build comes from rootDirectory + commands.
+          name: trimmedName,
+          kind: "monorepo",
+          image: "",
+          build: "",
+          dockerfile: "",
+          ports: portList,
+          dependsOn: splitList(dependsOn),
+          environment: envRecordFromRows(envRows),
+          volumes: splitList(volumes),
+          command: "",
+          restart,
+          enabled,
+          exposed,
+          exposedPort: exposed ? exposedPort.trim() || undefined : undefined,
+          domain: exposed && domainType === "free" ? domain.trim() || undefined : undefined,
+          customDomain:
+            exposed && domainType === "custom" ? customDomain.trim() || undefined : undefined,
+          domainType,
+          rootDirectory: rootDirectory.trim(),
+          framework: framework.trim() || undefined,
+          packageManager: packageManager.trim() || undefined,
+          buildImage: buildImage.trim() || undefined,
+          installCommand: installCommand.trim() || undefined,
+          buildCommand: buildCommand.trim() || undefined,
+          startCommand: startCommand.trim() || undefined,
+          outputDirectory: outputDirectory.trim() || undefined,
+        }
+      : {
+          name: trimmedName,
+          kind: "compose",
+          image: sourceType === "image" ? image.trim() : "",
+          build: sourceType === "build" ? build.trim() || "." : "",
+          dockerfile: sourceType === "build" ? dockerfile.trim() : "",
+          ports: portList,
+          dependsOn: splitList(dependsOn),
+          environment: envRecordFromRows(envRows),
+          volumes: splitList(volumes),
+          command: command.trim(),
+          restart,
+          enabled,
+          exposed,
+          exposedPort: exposed ? exposedPort.trim() || undefined : undefined,
+          domain: exposed && domainType === "free" ? domain.trim() || undefined : undefined,
+          customDomain:
+            exposed && domainType === "custom" ? customDomain.trim() || undefined : undefined,
+          domainType,
+        };
 
     try {
       await onSubmit(payload);
@@ -154,7 +224,9 @@ export function ServiceEditorModal({
       <form onSubmit={handleSubmit} className="flex max-h-[92vh] flex-col">
         <div className="border-b border-border/40 px-6 py-5">
           <h2 className="text-base font-semibold text-foreground">
-            {mode === "create" ? "Add service" : "Edit service"}
+            {mode === "create"
+              ? isMonorepo ? "Add sub-app" : "Add service"
+              : isMonorepo ? "Edit sub-app" : "Edit service"}
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Services are project children. Compose can create them, and manual services use the same deploy path.
@@ -177,62 +249,135 @@ export function ServiceEditorModal({
             />
           </Field>
 
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setSourceType("image")}
-                className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
-                  sourceType === "image"
-                    ? "bg-primary/10 text-primary ring-1 ring-primary/15"
-                    : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
-                }`}
-              >
-                Image
-              </button>
-              <button
-                type="button"
-                onClick={() => setSourceType("build")}
-                className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
-                  sourceType === "build"
-                    ? "bg-primary/10 text-primary ring-1 ring-primary/15"
-                    : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
-                }`}
-              >
-                Dockerfile
-              </button>
-            </div>
-
-            {sourceType === "image" ? (
-              <Field label="Image">
+          {isMonorepo ? (
+            // ── Monorepo sub-app: source build (no image/Dockerfile) ────
+            <div className="space-y-3">
+              <Field label="Root directory">
                 <input
-                  value={image}
-                  onChange={(event) => setImage(event.target.value)}
-                  placeholder="postgres:16"
-                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
+                  value={rootDirectory}
+                  onChange={(event) => setRootDirectory(event.target.value)}
+                  placeholder="apps/web"
+                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40 font-mono"
                 />
               </Field>
-            ) : (
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Build context">
+                <Field label="Framework">
                   <input
-                    value={build}
-                    onChange={(event) => setBuild(event.target.value)}
-                    placeholder="."
+                    value={framework}
+                    onChange={(event) => setFramework(event.target.value)}
+                    placeholder="nextjs"
                     className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
                   />
                 </Field>
-                <Field label="Dockerfile">
+                <Field label="Package manager">
                   <input
-                    value={dockerfile}
-                    onChange={(event) => setDockerfile(event.target.value)}
-                    placeholder="Dockerfile"
+                    value={packageManager}
+                    onChange={(event) => setPackageManager(event.target.value)}
+                    placeholder="pnpm"
                     className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
                   />
                 </Field>
               </div>
-            )}
-          </div>
+              <Field label="Build image">
+                <input
+                  value={buildImage}
+                  onChange={(event) => setBuildImage(event.target.value)}
+                  placeholder="node:22"
+                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40 font-mono"
+                />
+              </Field>
+              <Field label="Install command">
+                <input
+                  value={installCommand}
+                  onChange={(event) => setInstallCommand(event.target.value)}
+                  placeholder="pnpm install --frozen-lockfile"
+                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40 font-mono"
+                />
+              </Field>
+              <Field label="Build command">
+                <input
+                  value={buildCommand}
+                  onChange={(event) => setBuildCommand(event.target.value)}
+                  placeholder="pnpm build"
+                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40 font-mono"
+                />
+              </Field>
+              <Field label="Start command">
+                <input
+                  value={startCommand}
+                  onChange={(event) => setStartCommand(event.target.value)}
+                  placeholder="pnpm start"
+                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40 font-mono"
+                />
+              </Field>
+              <Field label="Output directory">
+                <input
+                  value={outputDirectory}
+                  onChange={(event) => setOutputDirectory(event.target.value)}
+                  placeholder=".next"
+                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40 font-mono"
+                />
+              </Field>
+            </div>
+          ) : (
+            // ── Compose service: image OR Dockerfile ────────────────────
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSourceType("image")}
+                  className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
+                    sourceType === "image"
+                      ? "bg-primary/10 text-primary ring-1 ring-primary/15"
+                      : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
+                  }`}
+                >
+                  Image
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSourceType("build")}
+                  className={`rounded-xl px-3 py-2 text-sm font-medium transition-colors ${
+                    sourceType === "build"
+                      ? "bg-primary/10 text-primary ring-1 ring-primary/15"
+                      : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
+                  }`}
+                >
+                  Dockerfile
+                </button>
+              </div>
+
+              {sourceType === "image" ? (
+                <Field label="Image">
+                  <input
+                    value={image}
+                    onChange={(event) => setImage(event.target.value)}
+                    placeholder="postgres:16"
+                    className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
+                  />
+                </Field>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="Build context">
+                    <input
+                      value={build}
+                      onChange={(event) => setBuild(event.target.value)}
+                      placeholder="."
+                      className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
+                    />
+                  </Field>
+                  <Field label="Dockerfile">
+                    <input
+                      value={dockerfile}
+                      onChange={(event) => setDockerfile(event.target.value)}
+                      placeholder="Dockerfile"
+                      className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
+                    />
+                  </Field>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Ports">
@@ -255,15 +400,19 @@ export function ServiceEditorModal({
             </Field>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Command">
-              <input
-                value={command}
-                onChange={(event) => setCommand(event.target.value)}
-                placeholder="npm start"
-                className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
-              />
-            </Field>
+          {/* Compose-only: per-container "command" override. Monorepo sub-apps
+              get their command from `startCommand` above, so we hide this. */}
+          <div className={`grid gap-3 ${isMonorepo ? "sm:grid-cols-1" : "sm:grid-cols-2"}`}>
+            {!isMonorepo && (
+              <Field label="Command">
+                <input
+                  value={command}
+                  onChange={(event) => setCommand(event.target.value)}
+                  placeholder="npm start"
+                  className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40"
+                />
+              </Field>
+            )}
             <Field label="Restart policy">
               <select
                 value={restart}
@@ -319,16 +468,19 @@ export function ServiceEditorModal({
             />
           </div>
 
-          <label className="flex items-center justify-between rounded-2xl border border-border/50 bg-muted/10 px-4 py-3">
+          <label
+            htmlFor="service-enabled"
+            className="flex items-center justify-between rounded-2xl border border-border/50 bg-muted/10 px-4 py-3 cursor-pointer"
+          >
             <span>
               <span className="block text-sm font-medium text-foreground">Enabled</span>
               <span className="text-xs text-muted-foreground">Enabled services deploy with the project.</span>
             </span>
-            <input
-              type="checkbox"
+            <Checkbox
+              id="service-enabled"
               checked={enabled}
-              onChange={(event) => setEnabled(event.target.checked)}
-              className="h-4 w-4 accent-primary"
+              onCheckedChange={setEnabled}
+              aria-label="Enabled"
             />
           </label>
         </div>

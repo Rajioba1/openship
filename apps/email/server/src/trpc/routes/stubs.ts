@@ -107,12 +107,15 @@ async function readLiveSessionIds(raw: string | undefined): Promise<string[]> {
   return ids.filter((id) => alive.has(id));
 }
 
+// Host-only — see the long comment in routes/auth.ts for why we deliberately
+// don't set a Domain attribute. Same shape as the canonical COOKIE_OPTS in
+// auth.ts; kept duplicated locally to avoid a circular import between this
+// tRPC stub and the HTTP routes.
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: env.NODE_ENV === 'production',
   sameSite: 'Lax' as const,
   path: '/',
-  domain: env.COOKIE_DOMAIN === 'localhost' ? undefined : env.COOKIE_DOMAIN,
 };
 
 export const connectionsRouter = router({

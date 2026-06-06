@@ -24,6 +24,7 @@ export {
 export { createDomainRepo, type Domain, type NewDomain } from "./domain.repo";
 export {
   createServiceRepo,
+  normalizeRoutingFields,
   type Service,
   type NewService,
   type ServiceDeployment,
@@ -36,6 +37,11 @@ export {
   type NewInstanceSettings,
 } from "./instance-settings.repo";
 export { createServerRepo, type Server, type NewServer } from "./server.repo";
+export {
+  createMailServerRepo,
+  type MailServer,
+  type NewMailServer,
+} from "./mail-server.repo";
 export {
   createAnalyticsRepo,
   type ServerAnalyticsRow,
@@ -59,6 +65,7 @@ import { createServiceRepo } from "./service.repo";
 import { createSettingsRepo } from "./settings.repo";
 import { createInstanceSettingsRepo } from "./instance-settings.repo";
 import { createServerRepo } from "./server.repo";
+import { createMailServerRepo } from "./mail-server.repo";
 import { createAnalyticsRepo } from "./analytics.repo";
 
 /**
@@ -83,5 +90,6 @@ export const repos = {
   settings: createSettingsRepo(db),
   instanceSettings: createInstanceSettingsRepo(db),
   server: createServerRepo(db),
+  mailServer: createMailServerRepo(db),
   analytics: createAnalyticsRepo(db),
 } as const;

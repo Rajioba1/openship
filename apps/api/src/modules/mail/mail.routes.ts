@@ -19,6 +19,9 @@ mailRoutes.use("*", authMiddleware);
 /* ── Setup wizard ─────────────────────────────────────────────────── */
 mailRoutes.get("/steps", mail.getSteps);
 mailRoutes.get("/status", mail.getStatus);
+// Cross-server mail-install summary — lets the /emails page auto-select
+// the only mail server when there's exactly one.
+mailRoutes.get("/servers", mail.listMailServers);
 mailRoutes.post("/setup", mail.startSetup);
 mailRoutes.post("/setup/cancel", mail.cancelSetup);
 mailRoutes.post("/setup/dns-ack", mail.acknowledgeDns);

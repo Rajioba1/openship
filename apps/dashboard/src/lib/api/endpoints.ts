@@ -35,6 +35,7 @@ export const endpoints = {
     autoDeploy: (id: string | number) => `projects/${id}/auto-deploy`,
     webhookDomain: (id: string | number) => `projects/${id}/webhook-domain`,
     resources: (id: string | number) => `projects/${id}/resources`,
+    cloneToken: (id: string | number) => `projects/${id}/clone-token`,
     sleepMode: (id: string | number) => `projects/${id}/sleep-mode`,
     deployments: (id: string | number) => `projects/${id}/deployments`,
     logs: (id: string | number) => `projects/${id}/logs`,
@@ -177,6 +178,7 @@ export const endpoints = {
   mail: {
     steps: "mail/steps",
     status: "mail/status",
+    servers: "mail/servers",
     setup: "mail/setup",
     cancelSetup: "mail/setup/cancel",
     acknowledgeDns: "mail/setup/dns-ack",
@@ -239,6 +241,8 @@ export const endpoints = {
     upsert: "settings",
     buildMode: "settings/build-mode",
     deployDefaults: "settings/deploy-defaults",
+    cloneCredentials: "settings/clone-credentials",
+    cloneStrategyPreference: "settings/clone-strategy-preference",
   },
 
   /* ---------------------------------------------------------------- */

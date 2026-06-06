@@ -181,9 +181,21 @@ export default function EmailsPage() {
     [],
   );
 
-  // On mount: if URL has a serverId hint, resolve it + fetch its state.
-  // Otherwise just stop loading — ServerSelector will trigger a fetch
-  // once the user (or auto-select) picks one.
+  // On mount, pick the right server in this order:
+  //
+  //   1. URL hint (?serverId=…) wins.
+  //   2. Otherwise, find servers that already have mail installed
+  //      (state file present on disk). Exactly one → silently select it
+  //      and jump straight to its admin/progress UI.
+  //   3. Otherwise, if the user has exactly ONE openship server at all,
+  //      pre-select it in the install form. There's nothing to pick, so
+  //      don't make them click.
+  //   4. Otherwise (multiple servers, no mail installed) → show picker
+  //      so the user chooses where to install.
+  //
+  // The combined effect: a single-VPS user never sees a picker, and a
+  // multi-VPS user only sees it the one time when no mail server exists
+  // yet — after that the auto-select kicks in.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -192,9 +204,37 @@ export default function EmailsPage() {
         if (cancelled) return;
         if (opt) setSelectedServer(opt);
         await fetchStatusForServer(hintedServerId);
-      } else {
-        setLoading(false);
+        return;
       }
+      try {
+        const { servers: mailServers } = await mailApi.listMailServers();
+        if (cancelled) return;
+        if (mailServers.length === 1) {
+          const opt = await loadServerOption(mailServers[0].id);
+          if (cancelled) return;
+          if (opt) setSelectedServer(opt);
+          await fetchStatusForServer(mailServers[0].id);
+          return;
+        }
+        if (mailServers.length === 0) {
+          // No mail installed anywhere yet — fall back to "is there only
+          // one openship server total?" and pre-select that one in the
+          // install form. Two-or-more openship servers with no mail still
+          // surface the picker so the user chooses where to provision.
+          const allServers = await systemApi.listServers();
+          if (cancelled) return;
+          if (allServers.length === 1) {
+            const opt = await loadServerOption(allServers[0].id);
+            if (cancelled) return;
+            if (opt) setSelectedServer(opt);
+            await fetchStatusForServer(allServers[0].id);
+            return;
+          }
+        }
+      } catch {
+        // Listing failed — fall through to the picker. Not fatal.
+      }
+      if (!cancelled) setLoading(false);
     })();
     return () => {
       cancelled = true;

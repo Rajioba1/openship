@@ -721,8 +721,12 @@ export function useDeploymentBuild(
           buildDurationMs: data.buildDurationMs ?? null,
           buildStartedAt: data.buildStartedAt ?? null,
           buildRetryCarryMs: prev.buildRetryCarryMs,
-          // Restore per-service statuses for compose projects
-          serviceStatuses: data.projectType === "services" && data.services && data.serviceStatuses
+          // Restore per-service statuses for compose AND monorepo projects.
+          // Monorepo sub-apps fan out through the same multi-service pipeline,
+          // so the same SSE statuses apply.
+          serviceStatuses:
+            (data.projectType === "services" || data.projectType === "monorepo") &&
+            data.services && data.serviceStatuses
             ? (data.services as any[]).map((svc: any) => {
                 const sd = (data.serviceStatuses as any[]).find((s: any) => s.serviceId === svc.serviceId);
                 const rawStatus = sd?.status ?? "pending";

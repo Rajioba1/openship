@@ -33,7 +33,7 @@ import { LocalExecutor, wrapLocalBuildCommand } from "../system/executor";
 import { STACKS, TRANSFER_EXCLUDES, type StackId, type StackDefinition } from "@repo/core";
 import { checkToolchainForStack, installTools } from "../toolchain";
 import type { RuntimeAdapter, RuntimeCapability } from "./types";
-import { BuildLogger, runBuildPipeline, sq, type BuildEnvironment } from "./build-pipeline";
+import { BuildLogger, detectBuildKillHint, runBuildPipeline, sq, type BuildEnvironment } from "./build-pipeline";
 import { runLocalBuild } from "./local-build";
 import { transferLocalDirectory } from "./transfer";
 import type { ProcessSupervisor } from "./supervisor/types";
@@ -173,6 +173,18 @@ export class BareRuntime implements RuntimeAdapter {
     remotePath: string,
     logger: BuildLogger,
   ): Promise<void> {
+    // Default ("auto") mode — prefer rsync over the system `ssh` binary,
+    // fall back to tar piped through the existing ssh2 channel only if
+    // rsync is missing on either side.
+    //
+    // The old comment here forced `mode: "tar"` claiming rsync's
+    // per-file roundtrips were slow. That comparison assumed both
+    // transports used the same SSH layer, which they don't:
+    //   - rsync uses the SYSTEM `ssh` binary → ~10-30 MB/s typical
+    //   - our tar pipe uses the Node `ssh2` library → ~0.3-1 MB/s
+    //     (small default window, JS-side framing/cipher overhead)
+    // So even with rsync's per-file scan, system ssh is 10-30× faster
+    // on the wire — and we get native `--progress` output for free.
     await transferLocalDirectory(
       localPath,
       {
@@ -239,6 +251,9 @@ export class BareRuntime implements RuntimeAdapter {
           await this.executor.rm(remoteDir);
           await this.executor.mkdir(remoteDir);
 
+          // Default ("auto") mode — rsync over system `ssh` first, tar
+          // through ssh2 only as fallback. See transferFiles above for
+          // the full rationale (system ssh ≫ Node ssh2 on the wire).
           if (stackDef?.productionPaths?.length) {
             // Compiled stacks (Go, Rust, .NET, etc.) — transfer only production artifacts
             log.log(`Transferring production paths: ${stackDef.productionPaths.join(", ")}\n`);
@@ -315,10 +330,13 @@ export class BareRuntime implements RuntimeAdapter {
         const effectiveCommand = this.executor instanceof LocalExecutor
           ? wrapLocalBuildCommand(command)
           : command;
-        const { code } = await this.executor.streamExec(effectiveCommand, logCb);
+        const { code, output } = await this.executor.streamExec(effectiveCommand, logCb);
         if (abort.signal.aborted) throw new Error("Build cancelled");
         if (code !== 0) {
-          throw new Error(`Command failed with exit code ${code}`);
+          const hint = detectBuildKillHint(output);
+          throw new Error(
+            `Command failed with exit code ${code}${hint ? ` — ${hint}` : ""}`,
+          );
         }
       },
       preflight: async (cfg, plog) => {

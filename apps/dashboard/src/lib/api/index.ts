@@ -40,10 +40,12 @@ export type {
   UserSettingsResponse,
   DefaultDeployTarget,
   DeployDefaultsResponse,
+  CloneCredentialsState,
+  CloneStrategyPreference,
 } from "./settings";
 export { cloudApi } from "./cloud";
 export type { CloudStatus } from "./cloud";
-export { servicesApi } from "./services";
+export { servicesApi, serviceKind } from "./services";
 export type { Service, ServiceContainer, ServiceEnvVar, ServiceInput } from "./services";
 export { mailApi } from "./mail";
 export { mailAdminApi } from "./mail-admin";

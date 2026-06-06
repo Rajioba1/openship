@@ -94,6 +94,16 @@ export const project = pgTable(
     gitUrl: text("git_url"),
     /** Installation ID for GitHub App access */
     installationId: integer("installation_id"),
+    /**
+     * Per-project clone-token override (encrypted via lib/encryption).
+     * When set, this is the first credential `resolveCloneToken` returns —
+     * highest priority in the chain. Users add this in the project's
+     * Resources tab when they want to scope a Fine-Grained PAT or PAT-like
+     * credential to just this project.
+     */
+    cloneTokenEncrypted: text("clone_token_encrypted"),
+    /** Timestamp of last update (for UI "last set X ago"). Null if cleared. */
+    cloneTokenSetAt: timestamp("clone_token_set_at"),
 
     /* ── Build configuration ────────────────────────────────────────────── */
     /** Detected framework (nextjs, vite, node, static, etc.) */
@@ -126,6 +136,12 @@ export const project = pgTable(
     /**
      * Shared install command run once at the repo root before any per-app build.
      * Only used when projectType === "monorepo" (e.g. "pnpm install -w").
+     *
+     * TODO: currently WRITE-ONLY — project-crud persists it but the build
+     * pipeline doesn't wire it into the workspace install step yet. Either
+     * thread it through createMonorepoSourceBuildConfig as a pre-install hook
+     * or drop the column in a follow-up migration. Today the runtime falls
+     * back to project.installCommand for monorepo sub-apps.
      */
     workspaceInstallCommand: text("workspace_install_command"),
 

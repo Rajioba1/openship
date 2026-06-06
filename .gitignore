@@ -42,3 +42,4 @@ npm-debug.log*
 pnpm-debug.log*
 .react-router
 .wrangler
+next-env.d.ts

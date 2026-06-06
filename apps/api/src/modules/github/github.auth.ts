@@ -234,6 +234,12 @@ export async function resolveToken(opts: TokenOptions): Promise<string | null> {
     case "cli": {
       const userToken = await getUserToken(opts.userId);
       if (userToken) return userToken;
+      // Same suppression as getUserStatus — once the user clicks Disconnect
+      // on the cli source, every downstream resolveToken caller must respect
+      // it (otherwise webhooks / clones silently bypass the disconnect).
+      const { isGithubCliDisabled } = await import("../settings/settings.service");
+      const cliDisabled = await isGithubCliDisabled(opts.userId);
+      if (cliDisabled) return null;
       return getLocalGhToken();
     }
   }
@@ -327,6 +333,12 @@ export async function getUserStatus(userId: string) {
     case "cli": {
       token = await getUserToken(userId);
       if (token) { tokenSource = "oauth"; break; }
+      // gh CLI fallback — only if the user hasn't explicitly disconnected it.
+      // Otherwise a user who clicked "Disconnect" from cli mode would silently
+      // stay connected because gh is still authed on the host.
+      const { isGithubCliDisabled } = await import("../settings/settings.service");
+      const cliDisabled = await isGithubCliDisabled(userId);
+      if (cliDisabled) break;
       token = await getLocalGhToken();
       tokenSource = "cli";
       break;
@@ -486,10 +498,27 @@ export function getInstallUrl(): string {
 }
 
 /**
- * Disconnect a user from GitHub OAuth.
+ * Disconnect a user from a GitHub source.
+ *
+ * `source`:
+ *   - "oauth" → remove the OAuth account row (Openship App / standalone OAuth)
+ *   - "cli"   → set the cli-suppression flag so the host's `gh auth token`
+ *               is ignored even when present. NEVER touches the host's gh
+ *               config — we only refuse to use it.
+ *   - "all"   → both of the above (default — preserves the old contract)
+ *
  * GitHub App installations remain until GitHub sends uninstall/suspend events.
  */
-export async function disconnectUser(userId: string): Promise<void> {
-  await repos.account.unlinkProvider(userId, "github");
+export async function disconnectUser(
+  userId: string,
+  source: "oauth" | "cli" | "all" = "all",
+): Promise<void> {
+  if (source === "oauth" || source === "all") {
+    await repos.account.unlinkProvider(userId, "github");
+  }
+  if (source === "cli" || source === "all") {
+    const { setGithubCliDisabled } = await import("../settings/settings.service");
+    await setGithubCliDisabled(userId, true);
+  }
   invalidateUserGitHubCache(userId);
 }

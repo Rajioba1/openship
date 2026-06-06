@@ -3,6 +3,7 @@ import {
   text,
   timestamp,
   integer,
+  boolean,
 } from "drizzle-orm/pg-core";
 import { user } from "./auth";
 
@@ -104,6 +105,33 @@ export const userSettings = pgTable("user_settings", {
    * when the id no longer resolves.
    */
   defaultServerId: text("default_server_id"),
+
+  /* ── Clone credentials ────────────────────────────────────────────────────
+   * User-level GitHub clone token (encrypted). The clone module reads this
+   * AFTER per-project override and BEFORE the GitHub App installation token,
+   * but only when `cloneTokenAsDefault === true`. Users set this in Settings
+   * to keep a single PAT for everything.
+   */
+  cloneTokenEncrypted: text("clone_token_encrypted"),
+  cloneTokenSetAt: timestamp("clone_token_set_at"),
+  cloneTokenAsDefault: boolean("clone_token_as_default").notNull().default(false),
+
+  /**
+   * What the first-time deploy nudge resolved to. Once set to anything other
+   * than "prompt", the nudge stops asking.
+   *   "prompt"            → first deploy will show the picker
+   *   "local"             → silently default unsafe combos to local build
+   *   "remote-with-token" → user accepted the trade-off, ship token to remote
+   */
+  cloneStrategyPreference: text("clone_strategy_preference").notNull().default("prompt"),
+
+  /**
+   * Local-mode gh-CLI suppression. In `cli` auth mode the API falls back to
+   * the host's `gh auth token` when no OAuth row is stored. That makes
+   * Disconnect feel broken because gh silently re-authenticates. When this
+   * flag is true the API treats gh CLI as if it isn't installed.
+   */
+  githubCliDisabled: boolean("github_cli_disabled").notNull().default(false),
 
   // ── Timestamps ─────────────────────────────────────────────────────────────
 

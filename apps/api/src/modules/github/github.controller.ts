@@ -90,6 +90,13 @@ export async function getHome(c: Context) {
 export async function connect(c: Context) {
   const userId = getUserId(c);
   const mode = githubAuth.getGitHubAuthMode();
+  // Clicking Connect always means "I want to be connected" — clear any
+  // prior cli-suppression flag from a previous Disconnect so the status
+  // check below can resolve via the gh CLI fallback if it's available.
+  if (mode === "cli") {
+    const { setGithubCliDisabled } = await import("../settings/settings.service");
+    await setGithubCliDisabled(userId, false);
+  }
   const status = await githubAuth.getUserStatus(userId);
 
   // ── Already connected? ─────────────────────────────────────
@@ -247,11 +254,22 @@ export async function pollConnect(c: Context) {
   return c.json(status);
 }
 
-/** POST /github/disconnect — Disconnect GitHub OAuth without uninstalling the GitHub App */
+/**
+ * POST /github/disconnect — Disconnect from one source (or both).
+ *
+ * Body / query: { source?: "oauth" | "cli" | "all" }   (default "all")
+ *
+ * Doesn't uninstall the GitHub App — that happens via webhook only.
+ */
 export async function disconnect(c: Context) {
   const userId = getUserId(c);
-  await githubAuth.disconnectUser(userId);
-  return c.json({ success: true });
+  const body = await c.req.json().catch(() => ({}));
+  const queryParam = c.req.query("source");
+  const rawSource = (body?.source ?? queryParam) as string | undefined;
+  const source: "oauth" | "cli" | "all" =
+    rawSource === "oauth" || rawSource === "cli" || rawSource === "all" ? rawSource : "all";
+  await githubAuth.disconnectUser(userId, source);
+  return c.json({ success: true, source });
 }
 
 // ─── Accounts / Organisations ────────────────────────────────────────────────

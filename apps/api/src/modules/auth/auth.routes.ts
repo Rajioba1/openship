@@ -63,15 +63,49 @@ if (env.DEPLOY_MODE === "desktop") {
       return c.json({ error: "Unauthorized" }, 401);
     }
 
+    // We're in zero-auth desktop mode AND Better Auth didn't recognise a
+    // session cookie. This is the FIRST call after a fresh browser /
+    // cleared cookies — bootstrap a real session right here so:
+    //
+    //   1. We mint a Better-Auth-valid session row in the DB.
+    //   2. We Set-Cookie the signed token on this same response.
+    //   3. Future requests (including the dashboard's `proxy.ts` cookie
+    //      sniff) see the cookie and pass through.
+    //
+    // Without minting the cookie, the dashboard endlessly redirected:
+    // proxy.ts saw no cookie → /login; (auth) layout's getSession() saw
+    // the synthetic-session 200 → redirect to /. Loop. Fix is to ensure
+    // the API's "yes you have a session" claim is always backed by a
+    // real cookie the browser will send back next time.
+    //
+    // Same path as /desktop-login — we just inline it on the first
+    // /get-session call so users never have to manually navigate there.
     const { ensureLocalUser } = await import("../../lib/local-user");
+    const { createLocalSession } = await import("../../lib/cloud-auth-proxy");
     const user = await ensureLocalUser();
+    const session = await createLocalSession(user.id, "127.0.0.1", "desktop");
+
+    await setSignedCookie(
+      c,
+      `${COOKIE_PREFIX}.session_token`,
+      session.token,
+      env.BETTER_AUTH_SECRET,
+      {
+        httpOnly: true,
+        secure: false,
+        sameSite: "Lax",
+        path: "/",
+        expires: session.expiresAt,
+      },
+    );
+
     const now = new Date().toISOString();
     return c.json({
       session: {
-        id: "desktop-session",
+        id: session.id,
         userId: user.id,
-        token: "desktop",
-        expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+        token: session.token,
+        expiresAt: session.expiresAt.toISOString(),
         createdAt: now,
         updatedAt: now,
       },

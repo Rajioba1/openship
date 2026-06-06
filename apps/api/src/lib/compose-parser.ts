@@ -9,6 +9,17 @@ import { parse as parseYaml } from "yaml";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/**
+ * Output of parsing a docker-compose.yml — the raw service rows as the YAML
+ * file describes them, nothing else. If you see a field here that isn't in
+ * the compose spec, it doesn't belong.
+ *
+ * Pipeline code that needs to handle both compose services AND monorepo
+ * sub-apps should consume `DeployableService` from `./deployable-service.ts`
+ * — the wider shape that adds the source-built sub-app fields on top of
+ * this one. Keeping the parser type narrow stops monorepo fields from
+ * leaking back into the parser's expected output.
+ */
 export interface ComposeService {
   name: string;
   image?: string;

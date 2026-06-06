@@ -78,8 +78,6 @@ export interface Env {
   NODE_ENV: 'development' | 'production' | 'test';
   PORT: number;
 
-  PUBLIC_BACKEND_URL: string;
-  PUBLIC_APP_URL: string;
   COOKIE_DOMAIN: string;
   TRUSTED_ORIGINS: string[];
 
@@ -118,8 +116,6 @@ export const env: Env = {
   NODE_ENV: (process.env.NODE_ENV as Env['NODE_ENV']) ?? 'development',
   PORT: int('PORT', 3030),
 
-  PUBLIC_BACKEND_URL: optional('PUBLIC_BACKEND_URL', 'http://localhost:3030'),
-  PUBLIC_APP_URL: optional('PUBLIC_APP_URL', 'http://localhost:3000'),
   COOKIE_DOMAIN: optional('COOKIE_DOMAIN', 'localhost'),
   // Defaults include the Zero client (:3000) and the openship dashboard
   // (:3001) — the dashboard writes branding here via tRPC and needs CORS

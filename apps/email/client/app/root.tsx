@@ -64,7 +64,10 @@ export const meta: MetaFunction = () => {
     { property: 'og:title', content: siteConfig.title },
     { property: 'og:description', content: siteConfig.description },
     { property: 'og:image', content: siteConfig.openGraph.images[0].url },
-    { property: 'og:url', content: siteConfig.alternates.canonical },
+    // `og:url` is intentionally omitted — siteConfig URLs are relative now
+    // (one build deploys anywhere), and scrapers resolve relative og:image
+    // against the page URL just fine. Adding a baked-in absolute here
+    // would defeat the multi-host portability.
     { property: 'og:type', content: 'website' },
     { rel: 'manifest', href: '/manifest.webmanifest' },
   ];

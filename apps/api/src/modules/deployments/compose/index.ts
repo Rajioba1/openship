@@ -18,14 +18,12 @@ export { deployComposeServices, type ComposeDeployResult } from "./deploy.servic
 // Project service-shape helpers
 export {
   isLegacyComposeProject,
-  listProjectServices,
   listProjectComposeServices,
   listProjectMonorepoApps,
-  projectServicesToComposeServices,
+  projectServicesToDeployableServices,
   resolveProjectServicePreflightServices,
   shouldUseProjectServicePipeline,
-  shouldUseProjectMonorepoPipeline,
 } from "./project-services";
 
 // Shared helpers
-export { normalizeSubdomain, defaultServiceSubdomain, parseServicePort } from "./domain-helpers";
+export { parseServicePort, resolveServicePort } from "./domain-helpers";

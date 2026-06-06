@@ -249,6 +249,30 @@ export function parseLogLevel(message: string): LogEntry["level"] {
 }
 
 /**
+ * Detect a kernel OOM / SIGKILL signature in a build's streamed output
+ * and produce a one-line, user-facing hint. Returns null when no such
+ * signature is present.
+ *
+ * Why: when the kernel OOM-kills a node/bun build, the parent process
+ * usually exits with a plain non-zero code (often 1), losing the signal
+ * info — operators see "Command failed with exit code 1" and have no
+ * idea the VPS ran out of memory. The output stream still carries
+ * the smoking gun ("SIGKILL", "Killed", "out of memory") right before
+ * the crash. We surface it.
+ */
+export function detectBuildKillHint(output: string): string | null {
+  if (!output) return null;
+  const tail = output.slice(-4096);
+  if (/\bsigkill\b|\bKilled\b|out of memory|JavaScript heap out of memory|Allocation failed/i.test(tail)) {
+    return (
+      "Build process was killed — typically because the target ran out of memory during the build. " +
+      "Increase RAM on the target, add swap, or build locally and ship the dist."
+    );
+  }
+  return null;
+}
+
+/**
  * Inject a token into an HTTPS git URL for private repo access.
  *
  * Converts `https://github.com/owner/repo.git`

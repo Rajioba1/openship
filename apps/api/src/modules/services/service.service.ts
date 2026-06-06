@@ -2,7 +2,7 @@
  * Service business logic — CRUD and compose sync.
  */
 
-import { repos } from "@repo/db";
+import { normalizeRoutingFields, repos } from "@repo/db";
 import type { LogEntry } from "@repo/adapters";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { assertProjectAccess, platform } from "../../lib/controller-helpers";
@@ -31,38 +31,23 @@ const trimOrNull = (value?: string | null) => {
   return trimmed || null;
 };
 
-function normalizeRoutingPatch(input: {
-  exposed?: boolean | null;
-  exposedPort?: string | null;
-  domain?: string | null;
-  customDomain?: string | null;
-  domainType?: string | null;
-}): {
+/**
+ * Patch-level wrapper around the canonical `normalizeRoutingFields` from
+ * @repo/db. Same body — narrows `domainType` to the literal union the
+ * service layer expects. Keeps a single source of truth: the DB repo
+ * owns the trim/null/clear semantics, this layer just types them.
+ */
+function normalizeRoutingPatch(input: Parameters<typeof normalizeRoutingFields>[0]): {
   exposed: boolean;
   exposedPort: string | null;
   domain: string | null;
   customDomain: string | null;
   domainType: "free" | "custom";
 } {
-  const exposed = input.exposed ?? false;
-  if (!exposed) {
-    return {
-      exposed: false,
-      exposedPort: null,
-      domain: null,
-      customDomain: null,
-      domainType: "free",
-    };
-  }
-
-  const domainType = input.domainType === "custom" ? "custom" : "free";
-
+  const r = normalizeRoutingFields(input);
   return {
-    exposed: true,
-    exposedPort: trimOrNull(input.exposedPort),
-    domain: domainType === "free" ? trimOrNull(input.domain) : null,
-    customDomain: domainType === "custom" ? trimOrNull(input.customDomain) : null,
-    domainType,
+    ...r,
+    domainType: r.domainType === "custom" ? "custom" : "free",
   };
 }
 
@@ -93,18 +78,41 @@ export async function createService(projectId: string, userId: string, data: TCr
     throw new Error("service-name-already-exists");
   }
 
+  // Discriminator default: compose. Matches the DB column default and the
+  // historical create payload (which had no `kind` field at all).
+  const kind: "compose" | "monorepo" = data.kind === "monorepo" ? "monorepo" : "compose";
+
+  // Monorepo sub-apps MUST carry a rootDirectory — the validator keeps it
+  // optional because the DB column is nullable (compose rows have null
+  // monorepo fields), but a kind="monorepo" row with no rootDirectory
+  // would silently fall back to repo root at build time. Catch it here
+  // instead of letting the build engine pick an empty path.
+  if (kind === "monorepo" && !data.rootDirectory?.trim()) {
+    throw new Error("monorepo-service-requires-rootDirectory");
+  }
+
   const services = await repos.service.listByProject(projectId);
+  // Monorepo sub-apps auto-expose with a free subdomain by default — same
+  // behaviour the project-import flow uses (project-crud.service.ts's
+  // persistMonorepoApps defaults `exposed: true`, `domainType: "free"`).
+  // Without this, sub-apps added later via the Services tab would default
+  // to internal-only and the operator would have to flip both toggles
+  // manually before the first deploy. Compose services keep the existing
+  // `exposed: false` default because most compose rows (databases,
+  // caches, queues) genuinely shouldn't be public.
+  const monorepoDefaults = kind === "monorepo";
   const routing = normalizeRoutingPatch({
-    exposed: data.exposed ?? false,
+    exposed: data.exposed ?? monorepoDefaults,
     exposedPort: data.exposedPort,
     domain: data.domain,
     customDomain: data.customDomain,
-    domainType: data.domainType,
+    domainType: data.domainType ?? (monorepoDefaults ? "free" : undefined),
   });
 
   return repos.service.create({
     projectId,
     name,
+    kind,
     image: trimOrNull(data.image),
     build: trimOrNull(data.build),
     dockerfile: trimOrNull(data.dockerfile),
@@ -117,6 +125,15 @@ export async function createService(projectId: string, userId: string, data: TCr
     ...routing,
     enabled: data.enabled ?? true,
     sortOrder: data.sortOrder ?? services.length,
+    // Monorepo sub-app fields — null for compose rows (the schema invariant).
+    rootDirectory: kind === "monorepo" ? trimOrNull(data.rootDirectory) : null,
+    installCommand: kind === "monorepo" ? trimOrNull(data.installCommand) : null,
+    buildCommand: kind === "monorepo" ? trimOrNull(data.buildCommand) : null,
+    startCommand: kind === "monorepo" ? trimOrNull(data.startCommand) : null,
+    outputDirectory: kind === "monorepo" ? trimOrNull(data.outputDirectory) : null,
+    framework: kind === "monorepo" ? trimOrNull(data.framework) : null,
+    packageManager: kind === "monorepo" ? trimOrNull(data.packageManager) : null,
+    buildImage: kind === "monorepo" ? trimOrNull(data.buildImage) : null,
   });
 }
 
@@ -149,6 +166,22 @@ export async function updateService(
   }
 
   for (const key of ["image", "build", "dockerfile", "command"] as const) {
+    if (key in patch) {
+      patch[key] = trimOrNull(patch[key]);
+    }
+  }
+  // Monorepo sub-app build settings: same trim-or-null treatment so empty
+  // strings become null in DB (matches the rest of the service columns).
+  for (const key of [
+    "rootDirectory",
+    "installCommand",
+    "buildCommand",
+    "startCommand",
+    "outputDirectory",
+    "framework",
+    "packageManager",
+    "buildImage",
+  ] as const) {
     if (key in patch) {
       patch[key] = trimOrNull(patch[key]);
     }
@@ -188,7 +221,9 @@ export async function updateService(
       const { routing, runtime } = platform();
       const runtimeName = runtime.name;
       const wasRoutable = svc.enabled && svc.exposed;
-      const isRoutable = (updated.enabled ?? svc.enabled) && (updated.exposed ?? svc.exposed);
+      // `enabled` / `exposed` are non-nullable DB columns — no need to
+      // fall back to `svc.*` on the updated row.
+      const isRoutable = updated.enabled && updated.exposed;
       const oldRoute = buildServiceRouteDomain({
         project,
         service: svc,

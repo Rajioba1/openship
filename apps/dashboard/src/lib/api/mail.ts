@@ -288,6 +288,27 @@ export const mailApi = {
     ),
 
   /**
+   * List every server that has a mail install (state file) on disk. Used by
+   * the /emails page to short-circuit the picker when there's exactly one
+   * mail server provisioned. Servers without a state file or unreachable
+   * over SSH are omitted; the dashboard treats this list as the authoritative
+   * "which servers are mail servers" set.
+   */
+  listMailServers: () =>
+    api.get<{
+      servers: Array<{
+        id: string;
+        name: string;
+        host: string;
+        port: number;
+        user: string;
+        domain: string | null;
+        completed: boolean;
+        active: boolean;
+      }>;
+    }>(endpoints.mail.servers),
+
+  /**
    * Start or resume the mail setup wizard.
    * Returns an EventSource for SSE streaming.
    */
@@ -475,12 +496,18 @@ export const mailApi = {
      * Create a project + deployment for this webmail install and kick off
      * the deploy in the background. The dashboard then redirects to
      * /build/[deploymentId] and subscribes to the standard SSE endpoint.
+     *
+     * `target` discriminator:
+     *   { kind: "self", serverId } — host on an openship-managed server
+     *   { kind: "cloud" }          — host on Opshcloud
      */
     deployAsProject: (input: {
       mailServerId: string;
-      targetServerId: string;
       hostname: string;
       internalPort?: number;
+      target:
+        | { kind: "self"; serverId: string }
+        | { kind: "cloud" };
     }) =>
       api.post<{ deploymentId: string; projectId: string }>(
         endpoints.mail.webmail.deployProject,

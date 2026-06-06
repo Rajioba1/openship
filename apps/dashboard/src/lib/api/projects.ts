@@ -172,6 +172,26 @@ export const projectsApi = {
   update: (id: string | number, action: string, value: string) =>
     api.post<any>(endpoints.projects.update(id), { action, value }),
 
+  /**
+   * Get the per-project clone-token state. Returns only `{ hasToken, setAt }`
+   * — never the token itself.
+   */
+  getCloneToken: (id: string | number) =>
+    api.get<{ hasToken: boolean; setAt: string | null }>(endpoints.projects.cloneToken(id)),
+
+  /**
+   * Set/replace/clear the per-project clone token override. Highest priority
+   * in `resolveCloneToken`'s chain — used when the user wants a Fine-Grained
+   * PAT scoped to just this repo.
+   *   - token: null/empty → clear
+   *   - token: string     → encrypt + store
+   */
+  updateCloneToken: (id: string | number, body: { token: string | null }) =>
+    api.patch<{ hasToken: boolean; setAt: string | null }>(
+      endpoints.projects.cloneToken(id),
+      body,
+    ),
+
   /** Update full project fields */
   patch: (
     id: string | number,

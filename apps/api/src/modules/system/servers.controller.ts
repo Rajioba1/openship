@@ -21,32 +21,12 @@ function assertNotCloud(c: Context): boolean {
   return true;
 }
 
-/**
- * Coerce a request body's `runsApps` / `runsMail` field to a boolean,
- * preserving the schema defaults (apps=true, mail=false) when unset.
- *
- * Both flags can be true on the same row — that's a small self-hosted setup
- * running apps + iRedMail side by side. At least one must be true; the
- * controller enforces that below.
- */
-function coerceBool(input: unknown, fallback: boolean): boolean {
-  if (typeof input === "boolean") return input;
-  if (typeof input === "string") {
-    const v = input.trim().toLowerCase();
-    if (v === "true" || v === "yes" || v === "1") return true;
-    if (v === "false" || v === "no" || v === "0") return false;
-  }
-  return fallback;
-}
-
 /** Public shape — what the controller returns to clients (no SSH secrets). */
 function serializeServer(s: Awaited<ReturnType<typeof repos.server.get>>) {
   if (!s) return null;
   return {
     id: s.id,
     name: s.name,
-    runsApps: s.runsApps ?? true,
-    runsMail: s.runsMail ?? false,
     sshHost: s.sshHost,
     sshPort: s.sshPort,
     sshUser: s.sshUser,
@@ -86,19 +66,8 @@ export async function createServer(c: Context) {
   const host = (body.sshHost as string)?.trim();
   if (!host) return c.json({ error: "SSH host is required" }, 400);
 
-  const runsApps = coerceBool(body.runsApps, true);
-  const runsMail = coerceBool(body.runsMail, false);
-  if (!runsApps && !runsMail) {
-    return c.json(
-      { error: "A server must run at least one of apps or mail." },
-      400,
-    );
-  }
-
   const server = await repos.server.create({
     name: body.name?.trim() || null,
-    runsApps,
-    runsMail,
     sshHost: host,
     sshPort: body.sshPort ?? 22,
     sshUser: body.sshUser?.trim() || "root",
@@ -130,17 +99,6 @@ export async function updateServer(c: Context) {
   const patch: Record<string, unknown> = {};
 
   if (body.name !== undefined) patch.name = body.name?.trim() || null;
-  if (body.runsApps !== undefined) patch.runsApps = coerceBool(body.runsApps, existing.runsApps);
-  if (body.runsMail !== undefined) patch.runsMail = coerceBool(body.runsMail, existing.runsMail);
-  // Guard: at least one capability must be true after the update.
-  const nextRunsApps = patch.runsApps ?? existing.runsApps;
-  const nextRunsMail = patch.runsMail ?? existing.runsMail;
-  if (!nextRunsApps && !nextRunsMail) {
-    return c.json(
-      { error: "A server must run at least one of apps or mail." },
-      400,
-    );
-  }
   if (body.sshHost !== undefined) patch.sshHost = body.sshHost?.trim() || existing.sshHost;
   if (body.sshPort !== undefined) patch.sshPort = body.sshPort ?? 22;
   if (body.sshUser !== undefined) patch.sshUser = body.sshUser?.trim() || "root";

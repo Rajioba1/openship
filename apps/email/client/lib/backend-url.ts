@@ -1,32 +1,51 @@
 /**
  * Single source of truth for the Zero server URL.
  *
- * Resolution order:
- *   1. `import.meta.env.VITE_PUBLIC_BACKEND_URL` — Vite inlines this at
- *      build time from `.env*` / wrangler `vars`. Always wins when set.
- *   2. In DEV only: `http://localhost:3030`. Matches the default port
- *      from `apps/email/server/src/env.ts` so `bun dev` works without
- *      configuration. (The cloudflare vite plugin doesn't propagate
- *      `.env.development` to the SSR worker, so without this fallback
- *      SSR requests POST to "/undefined/api/trpc/...".)
- *   3. In PROD: throw. A misconfigured deploy that ships pointing at
- *      localhost is worse than failing loud — the worker would emit
- *      runtime errors on every request anyway, but a thrown error at
- *      module load surfaces the misconfig as soon as the route renders
- *      instead of hiding it in network noise.
+ * Zero is always served same-origin — the Hono server hosts BOTH the SPA
+ * (under `/`) AND the API (under `/api/*`, `/auth/*`, …) on the same
+ * port. So at runtime the backend URL is just whatever the browser
+ * loaded the page from — `window.location.origin`. No env, no build-time
+ * baking, one build deploys anywhere.
+ *
+ * Dev still needs a fallback: when the Vite dev server runs the SPA on
+ * port 3000 and the Hono server runs on 3030, `window.location.origin`
+ * points at the wrong place. The `VITE_PUBLIC_BACKEND_URL` env var,
+ * read here purely as an OPTIONAL dev override, fills that gap. In
+ * production builds it's intentionally unused — Vite still inlines it
+ * if set, but the runtime preference wins.
+ *
+ * SSR / pre-render: `window` doesn't exist. SPA mode means the static
+ * HTML shell isn't actually issuing tRPC requests during SSR, so any
+ * placeholder works. We return `''` and let the hydrated client
+ * recompute against the real origin.
  */
 
-const DEV_FALLBACK = 'http://localhost:3030';
-
-function resolve(): string {
-  const fromEnv = import.meta.env.VITE_PUBLIC_BACKEND_URL as string | undefined;
-  if (fromEnv && fromEnv !== 'undefined') return fromEnv;
-  if (import.meta.env.DEV) return DEV_FALLBACK;
-  throw new Error(
-    'VITE_PUBLIC_BACKEND_URL is not set. Production builds require this to be ' +
-      'injected at build time via wrangler `vars` or the deploy env.',
-  );
+function isBrowser(): boolean {
+  return typeof window !== 'undefined' && !!window.location?.origin;
 }
 
-export const BACKEND_URL = resolve();
-export const TRPC_URL = `${BACKEND_URL}/api/trpc`;
+export function getBackendUrl(): string {
+  if (isBrowser()) return window.location.origin;
+  // Dev: Vite SPA on 3000 → Hono on 3030 — same-origin doesn't apply.
+  // Only consulted off-browser (SSR / module-load on Node) where the
+  // import.meta.env access is safe.
+  const fromEnv =
+    typeof import.meta !== 'undefined'
+      ? (import.meta.env?.VITE_PUBLIC_BACKEND_URL as string | undefined)
+      : undefined;
+  if (fromEnv && fromEnv !== 'undefined') return fromEnv;
+  return '';
+}
+
+export function getTrpcUrl(): string {
+  return `${getBackendUrl()}/api/trpc`;
+}
+
+/**
+ * Legacy const exports — module-load-time values. Browser builds get the
+ * runtime origin; SSR/Node builds get '' (or the dev override). New code
+ * should call the getter functions above so a same-page navigation can't
+ * latch a stale value.
+ */
+export const BACKEND_URL = getBackendUrl();
+export const TRPC_URL = getTrpcUrl();

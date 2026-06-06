@@ -10,6 +10,10 @@ import EnvironmentVariables from "@/components/import-project/EnvironmentVariabl
 import MonorepoApps from "@/components/import-project/MonorepoApps";
 import Sidebar from "./components/Sidebar";
 import DeployTargetStep, { DeployTargetSummary, useDesktopTargets } from "./components/DeployTargetStep";
+// Clone-strategy gate moved from inline render to a preflight modal
+// triggered from <Sidebar>'s handleDeploy. The inline placement was
+// wrong (showed before the user clicked Deploy). See
+// CloneStrategyNudge.tsx for the hook + modal-content exports.
 import { decodeSlug } from "@/utils/repoSlug";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usesServiceDeployment } from "@/context/deployment/types";

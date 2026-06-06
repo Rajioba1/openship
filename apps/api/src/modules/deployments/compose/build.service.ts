@@ -10,8 +10,14 @@ import type { MultiServiceRuntimeAdapter, ResourceConfig } from "@repo/adapters"
 import { BuildLogger } from "@repo/adapters";
 import { repos, type Deployment, type Project } from "@repo/db";
 
-import { createDockerfileBuildConfig, type BuildConfigSnapshotLike } from "../build-config";
+import {
+  createDockerfileBuildConfig,
+  createMonorepoSourceBuildConfig,
+  type BuildConfigSnapshotLike,
+} from "../build-config";
 import * as sessionManager from "../session-manager";
+import { serviceKind } from "../../../lib/deployable-service";
+import { resolveServicePort } from "./domain-helpers";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -22,6 +28,92 @@ function sanitizeComposeImageName(value: string): string {
       .replace(/[^a-z0-9._-]+/g, "-")
       .replace(/^-+|-+$/g, "") || "service"
   );
+}
+
+// Port resolution moved to compose/domain-helpers.ts:resolveServicePort —
+// shared with the deploy pipeline so both stages compute the same number.
+
+/**
+ * Resolve a monorepo sub-app's build overrides on top of the project-level
+ * snapshot, with a SINGLE, NAMED precedence rule:
+ *
+ *   per-service value (non-null on the row)  →  project-level snapshot default
+ *
+ * The DB invariant is that monorepo rows MAY have null columns even when the
+ * project-level fields are populated — e.g. the workspace shares a package
+ * manager and root build image. We accept the inheritance for legitimately
+ * shared fields (framework, buildImage, packageManager, outputDirectory) and
+ * for the command fields (install/build/start) where the user hasn't bothered
+ * to set a per-app override.
+ *
+ * `logger` receives a one-line warning whenever a COMMAND falls back to the
+ * project-level value. Commands are the most common per-app misconfiguration
+ * (you meant to set startCommand="bun run apps/web/dist/server.js" but forgot
+ * and got the workspace's "bun run start"). Surfacing the fallback in the
+ * build trace lets the user see "this came from project, not service" instead
+ * of silently picking up a value from a layer they weren't editing.
+ */
+interface SubAppOverrideInputs {
+  service: {
+    name: string;
+    framework: string | null;
+    buildImage: string | null;
+    packageManager: string | null;
+    installCommand: string | null;
+    buildCommand: string | null;
+    startCommand: string | null;
+    outputDirectory: string | null;
+  };
+  snapshot: Pick<
+    BuildConfigSnapshotLike,
+    "framework" | "buildImage" | "packageManager" | "installCommand" | "buildCommand" | "startCommand" | "outputDirectory"
+  >;
+  logger: Pick<BuildLogger, "log">;
+}
+
+function resolveSubAppOverrides(opts: SubAppOverrideInputs): {
+  stack: string | undefined;
+  buildImage: string | undefined;
+  packageManager: string | undefined;
+  installCommand: string | undefined;
+  buildCommand: string | undefined;
+  startCommand: string | undefined;
+  outputDirectory: string;
+} {
+  const { service, snapshot, logger } = opts;
+
+  const noteCommandFallback = (field: string, value: string | undefined) => {
+    if (value !== undefined && value !== null && value !== "") {
+      logger.log(
+        `Sub-app "${service.name}" inherited ${field}="${value}" from project-level defaults (no per-service value set).\n`,
+        "info",
+        { serviceName: service.name },
+      );
+    }
+  };
+
+  const installCommand = service.installCommand ?? snapshot.installCommand ?? undefined;
+  if (service.installCommand === null && installCommand !== undefined) {
+    noteCommandFallback("installCommand", installCommand);
+  }
+  const buildCommand = service.buildCommand ?? snapshot.buildCommand ?? undefined;
+  if (service.buildCommand === null && buildCommand !== undefined) {
+    noteCommandFallback("buildCommand", buildCommand);
+  }
+  const startCommand = service.startCommand ?? snapshot.startCommand ?? undefined;
+  if (service.startCommand === null && startCommand !== undefined) {
+    noteCommandFallback("startCommand", startCommand);
+  }
+
+  return {
+    stack: service.framework ?? snapshot.framework ?? undefined,
+    buildImage: service.buildImage ?? snapshot.buildImage ?? undefined,
+    packageManager: service.packageManager ?? snapshot.packageManager ?? undefined,
+    installCommand,
+    buildCommand,
+    startCommand,
+    outputDirectory: service.outputDirectory ?? snapshot.outputDirectory ?? "",
+  };
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -56,7 +148,23 @@ export async function buildComposeImages(opts: {
   const buildFailures = new Map<string, string>();
   const startedAt = Date.now();
 
-  const buildable = enabled.filter((service) => !!service.build);
+  // Buildable = anything that needs a per-service image build.
+  //   - Compose rows with a Dockerfile context (service.build set).
+  //   - Monorepo sub-apps (kind="monorepo") with EITHER a buildCommand or a
+  //     startCommand. Run-only sub-apps (prebuilt artifacts in repo, static
+  //     serve, etc.) have no buildCommand but still need to be containerized
+  //     to start — the generated Dockerfile is happy with an empty
+  //     buildCommand as long as it has something to CMD. Excluding them
+  //     would drop them to neither bucket and they'd silently fail at
+  //     deploy time with a misleading "No image available" error.
+  // External = compose rows with a pre-built image and no Dockerfile build.
+  const buildable = enabled.filter(
+    (service) =>
+      !!service.build ||
+      (serviceKind(service) === "monorepo" &&
+        !service.image &&
+        (!!service.buildCommand || !!service.startCommand)),
+  );
   const external = enabled.filter((service) => !service.build && !!service.image);
 
   // ── Broadcast initial per-service status for ALL services ──────────
@@ -97,10 +205,15 @@ export async function buildComposeImages(opts: {
   // ── Build all services in parallel ──────────────────────────────────
   await Promise.all(
     buildable.map(async (service) => {
-      const context = service.build ?? opts.snapshot.rootDirectory;
+      const isMonorepo = serviceKind(service) === "monorepo";
+      // Build context resolution:
+      //   - Compose service with Dockerfile  → service.build (the context dir)
+      //   - Monorepo sub-app                 → service.rootDirectory
+      //   - Fallback                         → snapshot.rootDirectory
+      const context = service.build ?? service.rootDirectory ?? opts.snapshot.rootDirectory;
       const dockerfileLabel = service.dockerfile ? ` using ${service.dockerfile}` : "";
       opts.logger.log(
-        `Building compose service "${service.name}" from ${context || "."}${dockerfileLabel}...\n`,
+        `Building ${isMonorepo ? "monorepo app" : "compose service"} "${service.name}" from ${context || "."}${dockerfileLabel}...\n`,
         "info",
         {
           serviceName: service.name,
@@ -135,24 +248,48 @@ export async function buildComposeImages(opts: {
         );
       }
 
-      const buildResult = await opts.runtime.build(
-        createDockerfileBuildConfig({
-          project: opts.project,
-          dep: opts.dep,
-          snapshot: opts.snapshot,
-          sessionId: `${opts.buildSessionId}-${service.id}`,
-          envVars: opts.buildEnvVars,
-          resources: opts.buildResources,
-          gitToken: opts.gitToken,
-          overrides: {
-            slug: `${sanitizeComposeImageName(opts.project.slug ?? opts.project.name)}-${sanitizeComposeImageName(service.name)}`,
-            rootDirectory: context,
-            dockerfilePath: service.dockerfile ?? undefined,
-            hasServer: true,
-          },
-        }),
-        serviceLogger,
-      );
+      // BuildConfig differs by kind:
+      //   - Compose service (Dockerfile in repo) → createDockerfileBuildConfig
+      //     forces stack="docker", clears install/build/start so the runtime
+      //     defers everything to the repo Dockerfile.
+      //   - Monorepo sub-app (source build)      → createMonorepoSourceBuildConfig
+      //     keeps the sub-app's stack/installCommand/buildCommand/startCommand/
+      //     outputDirectory so the runtime synthesizes a Dockerfile from them.
+      const buildSlug = `${sanitizeComposeImageName(opts.project.slug ?? opts.project.name)}-${sanitizeComposeImageName(service.name)}`;
+      const buildConfig = isMonorepo
+        ? createMonorepoSourceBuildConfig({
+            project: opts.project,
+            dep: opts.dep,
+            snapshot: opts.snapshot,
+            sessionId: `${opts.buildSessionId}-${service.id}`,
+            envVars: opts.buildEnvVars,
+            resources: opts.buildResources,
+            gitToken: opts.gitToken,
+            overrides: {
+              slug: buildSlug,
+              ...resolveSubAppOverrides({ service, snapshot: opts.snapshot, logger: serviceLogger }),
+              rootDirectory: context,
+              port: resolveServicePort(service, opts.snapshot.port) ?? opts.snapshot.port,
+              hasServer: true,
+            },
+          })
+        : createDockerfileBuildConfig({
+            project: opts.project,
+            dep: opts.dep,
+            snapshot: opts.snapshot,
+            sessionId: `${opts.buildSessionId}-${service.id}`,
+            envVars: opts.buildEnvVars,
+            resources: opts.buildResources,
+            gitToken: opts.gitToken,
+            overrides: {
+              slug: buildSlug,
+              rootDirectory: context,
+              dockerfilePath: service.dockerfile ?? undefined,
+              hasServer: true,
+            },
+          });
+
+      const buildResult = await opts.runtime.build(buildConfig, serviceLogger);
 
       if (buildResult.status === "failed" || !buildResult.imageRef) {
         const failureMessage =

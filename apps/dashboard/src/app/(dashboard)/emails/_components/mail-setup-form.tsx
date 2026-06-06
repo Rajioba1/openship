@@ -66,11 +66,16 @@ export function MailSetupForm({
           </div>
         </div>
 
-        <ServerSelector
-          value={selectedServerId}
-          onSelect={onServerSelect}
-          forWorkload="mail"
-        />
+        {/* Only show the selector when no server has been pre-picked. The
+            page-level effect auto-selects when there's one mail-installed
+            server (or one openship server total) — showing the picker on
+            top of an already-resolved choice is just visual noise. */}
+        {!selectedServerId && (
+          <ServerSelector
+            value={selectedServerId}
+            onSelect={onServerSelect}
+          />
+        )}
 
         <div className="space-y-4 mb-6">
           <div>
@@ -105,7 +110,7 @@ export function MailSetupForm({
             />
             <p className="text-xs text-muted-foreground mt-1.5">
               Used to log into the mailbox after setup. You can change it later from
-              the server's Mail tab.
+              the admin panel below.
             </p>
           </div>
         </div>

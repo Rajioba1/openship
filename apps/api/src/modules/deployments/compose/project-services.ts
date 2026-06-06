@@ -1,14 +1,20 @@
 /**
  * Project service-shape helpers.
  *
- * Compose is only one way to populate project services. The deployment shape is
- * owned by the project: if it has saved services, or the current deploy request
- * includes parsed services, it uses the service pipeline.
+ * Compose is only one way to populate project services. The deployment shape
+ * is owned by the project: if it has saved services, or the current deploy
+ * request includes parsed services, it uses the service pipeline.
+ *
+ * The DB `service` row is the canonical shape — compose rows have null
+ * monorepo fields, monorepo rows have null compose-source fields. This file
+ * projects those rows into the wider `DeployableService` shape the pipeline
+ * consumes, without re-asserting that invariant on every field.
  */
 
 import { repos, type Project, type Service } from "@repo/db";
 import { getProjectType, type StackId } from "@repo/core";
-import type { ComposeService } from "../../../lib/compose-parser";
+import { serviceKind, type DeployableService } from "../../../lib/deployable-service";
+export { serviceKind } from "../../../lib/deployable-service";
 
 export function isLegacyComposeProject(project: Pick<Project, "framework">): boolean {
   const framework = project.framework as StackId | undefined;
@@ -21,14 +27,14 @@ export function isLegacyComposeProject(project: Pick<Project, "framework">): boo
   }
 }
 
-export async function listProjectServices(projectId: string): Promise<Service[]> {
-  return repos.service.listByProject(projectId);
-}
-
-/** Compose services only (excludes monorepo sub-app rows). */
+/** Deployable rows — both compose services AND monorepo sub-apps.
+ *  Both kinds travel through the same compose pipeline (kind-discriminated
+ *  build/deploy translators). Previously this filter excluded monorepo
+ *  rows so they fell back to the single-app single-primary path; now they
+ *  fan out via the unified pipeline. */
 export async function listProjectComposeServices(projectId: string): Promise<Service[]> {
   const all = await repos.service.listByProject(projectId);
-  return all.filter((s) => s.kind !== "monorepo");
+  return all.filter((s) => s.kind === "compose" || s.kind === "monorepo");
 }
 
 /** Monorepo sub-apps only. */
@@ -37,41 +43,61 @@ export async function listProjectMonorepoApps(projectId: string): Promise<Servic
   return all.filter((s) => s.kind === "monorepo");
 }
 
-export function projectServicesToComposeServices(services: Service[]): ComposeService[] {
-  return services.map((service) => ({
-    name: service.name,
-    image: service.image ?? undefined,
-    build: service.build ?? undefined,
-    dockerfile: service.dockerfile ?? undefined,
-    ports: (service.ports as string[] | null) ?? [],
-    dependsOn: (service.dependsOn as string[] | null) ?? [],
-    environment: (service.environment as Record<string, string> | null) ?? {},
-    volumes: (service.volumes as string[] | null) ?? [],
-    command: service.command ?? undefined,
-    restart: service.restart ?? undefined,
-    exposed: service.exposed,
-    exposedPort: service.exposedPort ?? undefined,
-    domain: service.domain ?? undefined,
-    customDomain: service.customDomain ?? undefined,
-    domainType: service.domainType === "custom" ? "custom" : "free",
+/**
+ * Project a row of the canonical `service` table into the pipeline's
+ * `DeployableService` shape.
+ *
+ * No `isMonorepo ?` per-field conditionals: the DB invariant is that compose
+ * rows have null monorepo fields and vice versa, so a `?? undefined` is all
+ * we need. Treating the row as the source of truth means a future "set
+ * installCommand on a compose row" bug would surface immediately instead of
+ * being silently masked here.
+ */
+export function projectServicesToDeployableServices(services: Service[]): DeployableService[] {
+  return services.map((s): DeployableService => ({
+    kind: serviceKind(s),
+    enabled: s.enabled,
+    name: s.name,
+    image: s.image ?? undefined,
+    build: s.build ?? undefined,
+    dockerfile: s.dockerfile ?? undefined,
+    ports: (s.ports as string[] | null) ?? [],
+    dependsOn: (s.dependsOn as string[] | null) ?? [],
+    environment: (s.environment as Record<string, string> | null) ?? {},
+    volumes: (s.volumes as string[] | null) ?? [],
+    command: s.command ?? undefined,
+    restart: s.restart ?? undefined,
+    exposed: s.exposed,
+    exposedPort: s.exposedPort ?? undefined,
+    domain: s.domain ?? undefined,
+    customDomain: s.customDomain ?? undefined,
+    domainType: s.domainType === "custom" ? "custom" : "free",
+    rootDirectory: s.rootDirectory ?? undefined,
+    installCommand: s.installCommand ?? undefined,
+    buildCommand: s.buildCommand ?? undefined,
+    startCommand: s.startCommand ?? undefined,
+    outputDirectory: s.outputDirectory ?? undefined,
+    framework: s.framework ?? undefined,
+    packageManager: s.packageManager ?? undefined,
+    buildImage: s.buildImage ?? undefined,
   }));
 }
 
 export async function resolveProjectServicePreflightServices(
   projectId: string,
-  requestServices?: ComposeService[] | null,
-): Promise<ComposeService[]> {
+  requestServices?: DeployableService[] | null,
+): Promise<DeployableService[]> {
   if (requestServices?.length) return requestServices;
   const services = await listProjectComposeServices(projectId);
-  return projectServicesToComposeServices(services.filter((service) => service.enabled));
+  return projectServicesToDeployableServices(services.filter((service) => service.enabled));
 }
 
 export async function shouldUseProjectServicePipeline(
   project: Project,
-  requestServices?: ComposeService[] | null,
+  requestServices?: DeployableService[] | null,
 ): Promise<boolean> {
   if (requestServices?.length) return true;
-  // Only compose rows trigger the compose pipeline — monorepo rows have their own.
+  // Both compose AND monorepo rows now trigger the unified pipeline.
   if ((await listProjectComposeServices(project.id)).length > 0) return true;
 
   // Compatibility for existing compose projects that may not have synced
@@ -79,10 +105,3 @@ export async function shouldUseProjectServicePipeline(
   return isLegacyComposeProject(project);
 }
 
-/** True when the project has any enabled monorepo sub-app row. */
-export async function shouldUseProjectMonorepoPipeline(
-  project: Project,
-): Promise<boolean> {
-  const apps = await listProjectMonorepoApps(project.id);
-  return apps.some((a) => a.enabled);
-}

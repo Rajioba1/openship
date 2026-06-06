@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { usePlatform } from "@/context/PlatformContext";
-import { servicesApi, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
+import { serviceKind, servicesApi, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
 import { deployApi } from "@/lib/api/deploy";
 import { useToast } from "@/context/ToastContext";
 import { resolveServiceHostnameLabel } from "@repo/core";
@@ -17,8 +17,6 @@ import {
   ChevronRight,
   ArrowLeft,
   Plus,
-  Database,
-  Zap,
 } from "lucide-react";
 import { ServiceDetailPanel } from "./services/ServiceDetailPanel";
 import { AddServiceModal } from "./services/AddServiceModal";
@@ -74,7 +72,12 @@ export const ServicesTab = () => {
     if (service.domainType === "custom" && service.customDomain) {
       return `https://${service.customDomain}`;
     }
-    const subdomain = resolveServiceHostnameLabel(projectSlugBase, service.name, service.domain);
+    const subdomain = resolveServiceHostnameLabel(
+      projectSlugBase,
+      service.name,
+      service.domain,
+      serviceKind(service),
+    );
     return `https://${subdomain}.${baseDomain}`;
   };
 
@@ -171,43 +174,118 @@ export const ServicesTab = () => {
   if (services.length === 0) {
     return (
       <>
-        <div className="bg-card rounded-2xl border border-border/50 p-10 text-center">
-          <div className="w-12 h-12 rounded-xl bg-muted/50 flex items-center justify-center mx-auto mb-4">
-            <Layers className="size-6 text-muted-foreground/50" />
+        <div className="bg-card rounded-2xl border border-border/50 px-6 pb-10 text-center">
+          {/* SVG illustration — central app card linked to three service
+              nodes (database, cache, queue). Uses the same `th-*` token
+              palette as the deployments empty state so the visual language
+              stays consistent across the app. */}
+          <div className="relative mx-auto w-72 h-44">
+            <svg className="absolute inset-0 w-full h-full" viewBox="0 0 288 180" fill="none">
+              {/* Decorative dots scattered behind */}
+              <circle cx="22" cy="46" r="4" fill="var(--th-on-10)" />
+              <circle cx="42" cy="138" r="6" fill="var(--th-on-08)" />
+              <circle cx="262" cy="38" r="3" fill="var(--th-on-12)" />
+              <circle cx="270" cy="128" r="5" fill="var(--th-on-06)" />
+              <path d="M16 110l2-4 2 4-4-2 4 0-4 2z" fill="var(--th-on-16)" />
+              <path d="M256 154l1.5-3 1.5 3-3-1.5 3 0-3 1.5z" fill="var(--th-on-12)" />
+
+              {/* Dashed connector lines from app card to each service */}
+              <path
+                d="M144 78 Q 90 70 60 76"
+                stroke="var(--th-on-12)"
+                strokeWidth="1.5"
+                strokeDasharray="3 3"
+                fill="none"
+              />
+              <path
+                d="M144 92 Q 144 130 144 138"
+                stroke="var(--th-on-12)"
+                strokeWidth="1.5"
+                strokeDasharray="3 3"
+                fill="none"
+              />
+              <path
+                d="M156 78 Q 200 70 228 76"
+                stroke="var(--th-on-12)"
+                strokeWidth="1.5"
+                strokeDasharray="3 3"
+                fill="none"
+              />
+
+              {/* Central "app" card */}
+              <rect
+                x="112"
+                y="56"
+                width="64"
+                height="48"
+                rx="10"
+                fill="var(--th-card-bg)"
+                stroke="var(--th-bd-default)"
+                strokeWidth="1"
+              />
+              <rect x="112" y="56" width="64" height="14" rx="10" fill="var(--th-sf-05)" />
+              <circle cx="122" cy="63" r="2" fill="#ef4444" fillOpacity="0.6" />
+              <circle cx="130" cy="63" r="2" fill="#eab308" fillOpacity="0.6" />
+              <circle cx="138" cy="63" r="2" fill="#22c55e" fillOpacity="0.6" />
+              <rect x="120" y="78" width="32" height="3" rx="1.5" fill="var(--th-on-12)" />
+              <rect x="120" y="85" width="48" height="2.5" rx="1.25" fill="var(--th-on-08)" />
+              <rect x="120" y="91" width="40" height="2.5" rx="1.25" fill="var(--th-on-08)" />
+
+              {/* Service node: Database (left) — stacked cylinders */}
+              <g transform="translate(34, 50)">
+                <ellipse cx="26" cy="6" rx="20" ry="5" fill="var(--th-sf-04)" stroke="var(--th-bd-subtle)" strokeWidth="1" />
+                <path d="M6 6 L6 22 Q 6 27 26 27 Q 46 27 46 22 L 46 6" fill="var(--th-sf-03)" stroke="var(--th-bd-subtle)" strokeWidth="1" />
+                <ellipse cx="26" cy="6" rx="20" ry="5" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
+                <ellipse cx="26" cy="22" rx="20" ry="5" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
+                <line x1="6" y1="6" x2="6" y2="22" stroke="var(--th-bd-default)" strokeWidth="1" />
+                <line x1="46" y1="6" x2="46" y2="22" stroke="var(--th-bd-default)" strokeWidth="1" />
+              </g>
+
+              {/* Service node: Cache (bottom) — lightning bolt in chip */}
+              <g transform="translate(124, 124)">
+                <rect width="40" height="32" rx="8" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
+                <path
+                  d="M22 8 L 14 18 L 19 18 L 17 24 L 25 14 L 20 14 L 22 8 Z"
+                  fill="var(--th-on-30)"
+                  stroke="var(--th-on-40)"
+                  strokeWidth="0.5"
+                />
+              </g>
+
+              {/* Service node: Queue/Container (right) — stacked rounded rects */}
+              <g transform="translate(202, 50)">
+                <rect x="6" y="14" width="40" height="18" rx="4" fill="var(--th-sf-04)" stroke="var(--th-bd-subtle)" strokeWidth="1" />
+                <rect x="3" y="7" width="40" height="18" rx="4" fill="var(--th-sf-03)" stroke="var(--th-bd-subtle)" strokeWidth="1" />
+                <rect x="0" y="0" width="40" height="18" rx="4" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
+                <circle cx="6" cy="9" r="1.5" fill="var(--th-on-30)" />
+                <rect x="12" y="7.5" width="22" height="3" rx="1.5" fill="var(--th-on-12)" />
+                <rect x="12" y="12.5" width="14" height="2.5" rx="1.25" fill="var(--th-on-08)" />
+              </g>
+            </svg>
           </div>
-          <p className="text-sm font-semibold text-foreground/80 mb-1">No services connected</p>
-          <p className="text-xs text-muted-foreground/60 max-w-[300px] mx-auto mb-5 leading-relaxed">
-            Add databases, caches, or other services to extend your app.
+
+          <h3 className="text-lg font-medium text-foreground/80 mb-2">
+            No services connected
+          </h3>
+          <p className="text-sm text-muted-foreground max-w-sm mx-auto mb-8 leading-relaxed">
+            Add a database, cache, or any other service to extend your app.
+            Pick from the catalog or paste any Docker image.
           </p>
-          <div className="flex flex-wrap justify-center gap-2 mb-5">
-            {[
-              { label: "PostgreSQL", icon: Database },
-              { label: "Redis", icon: Zap },
-              { label: "MySQL", icon: Database },
-            ].map((svc) => (
-              <span
-                key={svc.label}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-muted/40 text-[12px] text-muted-foreground"
-              >
-                <svc.icon className="size-3" />
-                {svc.label}
-              </span>
-            ))}
-          </div>
-          <div className="flex items-center justify-center gap-3">
-            <button
-              onClick={fetchData}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors"
-            >
-              <RefreshCw className="size-3.5" />
-              Refresh
-            </button>
+
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
             <button
               onClick={() => setCreateOpen(true)}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[13px] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5"
             >
-              <Plus className="size-3.5" />
+              <Plus className="size-4" />
               Add Service
+            </button>
+            <button
+              onClick={fetchData}
+              className="inline-flex items-center gap-2 px-6 py-3 bg-muted/50 text-foreground text-sm font-medium rounded-xl hover:bg-muted transition-colors"
+            >
+              <RefreshCw className="size-4" />
+              Refresh
             </button>
           </div>
         </div>
@@ -309,6 +387,21 @@ export const ServicesTab = () => {
           const ct = containerFor(svc.id);
           const status = ct?.status ?? (svc.enabled ? "stopped" : "disabled");
           const resolvedUrl = resolveServiceUrl(svc);
+          const isMonorepo = serviceKind(svc) === "monorepo";
+
+          // Monorepo sub-app subtitle assembled from the metadata each
+          // row already carries: rootDirectory (apps/dashboard) · framework
+          // (Next.js) · port (3202) → resolved URL (example.opsh.io).
+          // Each segment is shown only if present — keeps the line short
+          // for sub-apps that haven't been fully filled in yet.
+          const monorepoBits: string[] = [];
+          if (svc.rootDirectory) monorepoBits.push(svc.rootDirectory);
+          if (svc.framework) monorepoBits.push(svc.framework);
+          if (svc.exposedPort) monorepoBits.push(`port ${svc.exposedPort}`);
+          const subtitle = isMonorepo
+            ? monorepoBits.join(" · ")
+            : svc.image || svc.build || "";
+          const urlHost = resolvedUrl?.replace("https://", "");
 
           return (
             <button
@@ -333,7 +426,23 @@ export const ServicesTab = () => {
                   </span>
                 </div>
                 <p className="text-[12px] text-muted-foreground truncate mt-1">
-                  {resolvedUrl?.replace("https://", "") ?? (svc.image || svc.build || "—")}
+                  {isMonorepo ? (
+                    // Monorepo: "apps/dashboard · Next.js · port 3202 → my-app.opsh.io"
+                    <>
+                      {subtitle}
+                      {urlHost && (
+                        <>
+                          {subtitle && " → "}
+                          <span className="text-foreground/80">{urlHost}</span>
+                        </>
+                      )}
+                      {!subtitle && !urlHost && "—"}
+                    </>
+                  ) : (
+                    // Compose: existing single-line behavior — URL or
+                    // image/build descriptor as fallback.
+                    urlHost ?? subtitle ?? "—"
+                  )}
                 </p>
               </div>
 

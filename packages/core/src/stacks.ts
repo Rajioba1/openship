@@ -884,9 +884,40 @@ export const ALL_PACKAGE_MANAGERS: string[] = [
 
 /**
  * Paths always excluded when transferring project files (source or build output).
- * Framework-specific caches (e.g. `.next/cache`) are defined per-stack via `cacheDirs`.
+ *
+ * Three categories:
+ *  - VCS / source-control:    .git
+ *  - Dependency artifacts:    node_modules, vendor (the target re-installs)
+ *  - Build / cache artifacts: .next, .vite, .turbo, .cache, .react-router,
+ *                             .nuxt, .svelte-kit, .astro, .output, dist,
+ *                             build, .nx
+ *
+ * Framework-specific extras live per-stack via `cacheDirs`. The intent is
+ * to ship ONLY the source — the target installs and builds fresh — so the
+ * over-the-wire payload stays measured in MB, not GB.
  */
-export const TRANSFER_EXCLUDES: readonly string[] = ["node_modules", ".git", ".turbo"];
+export const TRANSFER_EXCLUDES: readonly string[] = [
+  ".git",
+  "node_modules",
+  "vendor",
+  ".next",
+  ".vite",
+  ".turbo",
+  ".cache",
+  ".react-router",
+  ".nuxt",
+  ".svelte-kit",
+  ".astro",
+  ".output",
+  ".nx",
+  "dist",
+  "build",
+  // Runtime state — sqlite DBs, branding uploads, dev-only generated
+  // secrets. If a release dir was started locally for testing, these
+  // appear next to the static artifacts; we never want to ship them.
+  "data",
+  ".dev-secrets.json",
+];
 
 /** Output directories keyed by stack — derived from STACKS */
 export const OUTPUT_DIRECTORIES: Record<string, string> = Object.fromEntries(

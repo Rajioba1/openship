@@ -30,7 +30,7 @@ import {
   type LifecycleContext,
 } from "../deployment-lifecycle";
 import * as sessionManager from "../session-manager";
-import type { ComposeService } from "../../../lib/compose-parser";
+import type { DeployableService } from "../../../lib/deployable-service";
 import { internalApiUrl } from "../../../config";
 
 import { buildComposeImages } from "./build.service";
@@ -47,7 +47,7 @@ export interface ComposePipelineOpts {
   usesManagedRouting: boolean;
   logger: BuildLogger;
   ctx: LifecycleContext;
-  snapshot: BuildConfigSnapshotLike & { composeServices?: ComposeService[]; serverId?: string };
+  snapshot: BuildConfigSnapshotLike & { composeServices?: DeployableService[]; serverId?: string };
   buildSessionId: string;
   buildEnvVars: Record<string, string>;
   buildResources: ResourceConfig;

@@ -64,9 +64,7 @@ export async function listWebmailTargets(
     kind: "opshcloud",
     serverId: "",
     label: "Opshcloud (managed)",
-    description: "Coming soon — managed hosting on Opshcloud",
-    disabled: true,
-    disabledReason: "Not yet available in self-hosted builds",
+    description: "Managed hosting · we provision the VM, route the domain, and run the cert",
   });
 
   return options;

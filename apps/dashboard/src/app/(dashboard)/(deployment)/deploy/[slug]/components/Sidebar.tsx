@@ -4,6 +4,10 @@ import { CustomSelect } from "@/components/ui/CustomSelect";
 import DomainSettings from "./DomainSettings";
 import BuildSummary from "./BuildSummary";
 import RuntimeModeModalContent from "./RuntimeModeModalContent";
+import {
+  CloneStrategyModalContent,
+  useCloneStrategyGate,
+} from "./CloneStrategyNudge";
 import { useDeployment } from "@/context/DeploymentContext";
 import {
   publicEndpointsNeedCloud,
@@ -142,6 +146,11 @@ const Sidebar: React.FC = () => {
   const isServices = usesServiceDeployment(config);
   const isDockerRuntimeProject = config.projectType === "docker" || isServices;
   const canConnectCloud = canUseCloudConnection({ selfHosted, deployMode });
+  // Clone-strategy gate — only meaningful for self-hosted server deploys
+  // where we need to pick how the repo gets cloned on the remote (local
+  // build vs PAT vs existing GitHub credential). Opshcloud has its own
+  // connect-account flow, local builds don't need a remote credential.
+  const cloneGate = useCloneStrategyGate(config.deployTarget);
 
   const handleOpenEnvironmentCreator = useCallback(() => {
     if (!config.projectId) return;
@@ -195,6 +204,32 @@ const Sidebar: React.FC = () => {
   const handleDeploy = useCallback(async () => {
     if (config.deployTarget === "cloud") {
       if (!requireCloud("Deploying to Openship Cloud")) return;
+    }
+
+    // Self-hosted server only: ask how the repo should be cloned on the
+    // remote target (build locally / use a PAT / use existing GitHub).
+    // Skipped entirely when:
+    //   - target is "cloud" (Opshcloud uses its own connect-account flow)
+    //   - target is "local" (no remote clone needed)
+    //   - user already picked a preference (`preference !== "prompt"`)
+    // The modal is awaited — deploy doesn't proceed until the user
+    // either picks or hits "Skip for now".
+    if (cloneGate.needsPrompt) {
+      await new Promise<void>((resolve) => {
+        let modalId = "";
+        modalId = showModal({
+          customContent: (
+            <CloneStrategyModalContent
+              hasGlobalToken={cloneGate.hasGlobalToken}
+              onDone={() => {
+                hideModal(modalId);
+                resolve();
+              }}
+            />
+          ),
+          maxWidth: "640px",
+        });
+      });
     }
 
     if (
@@ -268,7 +303,7 @@ const Sidebar: React.FC = () => {
     }
 
     await continueDeploy();
-  }, [baseDomain, canConnectCloud, config.deployTarget, config.publicEndpoints, config.services, continueDeploy, hideModal, isServices, requireCloud, showModal]);
+  }, [baseDomain, canConnectCloud, cloneGate.hasGlobalToken, cloneGate.needsPrompt, config.deployTarget, config.publicEndpoints, config.services, continueDeploy, hideModal, isServices, requireCloud, showModal]);
 
   return (
     <div className="lg:sticky lg:top-6 h-fit space-y-4">
@@ -319,7 +354,13 @@ const Sidebar: React.FC = () => {
         </div>
       </div>
 
-      {/* Domain — per-service for compose, checklist for others */}
+      {/* Domain — per-service for compose, checklist for others.
+          Monorepo flows through the single-app DomainSettings: its
+          `<PublicEndpointsCard>` already supports multiple endpoints
+          (the "+" button at the header adds another Domain card). The
+          monorepo init seeds `config.publicEndpoints` with one entry
+          per sub-app so the existing card renders them all without a
+          parallel UI. */}
       {isServices ? (
         <ComposeChecklist />
       ) : (

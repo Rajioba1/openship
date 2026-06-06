@@ -68,20 +68,22 @@ export const TopPathsSkeleton = () => {
 };
 
 export const StatsCardsSkeleton = () => {
+  // Matches the real `StatsCards` layout exactly so there's no layout shift
+  // when the data lands (grid-cols-2, same padding/heights/order).
   return (
-    <div className="grid grid-cols-4 gap-4 h-[100px]">
+    <div className="grid grid-cols-2 gap-4">
       {Array.from({ length: 4 }).map((_, i) => (
         <div
           key={i}
-          className="bg-card border border-border rounded-2xl p-4 h-full flex items-center animate-pulse"
+          className="bg-card border border-border/50 rounded-2xl p-4 animate-pulse"
         >
-          <div className="flex items-center gap-3 w-full">
-            <div className="w-12 h-12 rounded-2xl bg-muted/50 flex-shrink-0"></div>
-            <div className="flex-1 min-w-0">
-              <div className="h-6 w-20 bg-muted/50 rounded-2xl mb-2"></div>
-              <div className="h-4 w-24 bg-muted/30 rounded-2xl mb-1"></div>
-              <div className="h-3 w-20 bg-muted/30 rounded-2xl"></div>
+          <div className="flex flex-col">
+            <div className="mb-3 flex items-center gap-2">
+              <div className="size-4 rounded bg-muted/50" />
+              <div className="h-3 w-24 bg-muted/40 rounded" />
             </div>
+            <div className="h-7 w-20 bg-muted/50 rounded mb-2" />
+            <div className="h-3 w-28 bg-muted/30 rounded" />
           </div>
         </div>
       ))}

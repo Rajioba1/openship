@@ -17,6 +17,7 @@ import type { BuildConfig, CommandExecutor } from "../types";
 import { LocalExecutor, wrapLocalBuildCommand } from "../system/executor";
 import {
   BuildLogger,
+  detectBuildKillHint,
   runBuildPipeline,
   type BuildEnvironment,
   type BuildPipelineResult,
@@ -68,10 +69,13 @@ export async function runLocalBuild(
     projectDir: buildDir,
     exec: async (command, logCb) => {
       if (abort?.aborted) throw new Error("Build cancelled");
-      const { code } = await localExec.streamExec(wrapLocalBuildCommand(command), logCb);
+      const { code, output } = await localExec.streamExec(wrapLocalBuildCommand(command), logCb);
       if (abort?.aborted) throw new Error("Build cancelled");
       if (code !== 0) {
-        throw new Error(`Command failed with exit code ${code}`);
+        const hint = detectBuildKillHint(output);
+        throw new Error(
+          `Command failed with exit code ${code}${hint ? ` — ${hint}` : ""}`,
+        );
       }
     },
     preflight: async (cfg, plog) => {

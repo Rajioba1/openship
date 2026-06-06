@@ -259,6 +259,23 @@ export interface ThreadResponse {
   to?: Address[];
   cc?: Address[];
   bcc?: Address[];
+  /**
+   * IMAP UID hint — the UID this thread lives at in its source folder right
+   * now. UIDs are UIDVALIDITY-stable (effectively permanent on Dovecot) so
+   * the client can pass them back to `mail.get` as a fast-path so the
+   * server can skip the O(N) SEARCH HEADER scan.
+   *
+   * Always derived server-side from the same fetch that built the row —
+   * never trusted as the canonical identity (that's `messageId`).
+   */
+  uid?: number;
+  /**
+   * UIDVALIDITY of the mailbox at the moment the UID was captured. If the
+   * client's hint carries a stale value (admin recreated the mailbox or
+   * server returned a new UIDVALIDITY), the server falls back to the slow
+   * Message-Id lookup.
+   */
+  uidValidity?: number;
 }
 
 export interface AttachmentMeta {
@@ -344,8 +361,27 @@ export async function listThreads(
   return withImap(auth, async (client) => {
     const lock = await client.getMailboxLock(mailbox);
     try {
-      const status = await client.status(mailbox, { messages: true });
-      const total = status.messages ?? 0;
+      // Pull `uidValidity` and `exists` from the SELECT response that
+      // `getMailboxLock` just performed — `client.mailbox` is populated
+      // from it. We must NOT call `client.status(mailbox, …)` here: RFC
+      // 3501 §6.3.10 forbids STATUS on the currently-selected mailbox,
+      // and Dovecot's behavior is version-dependent (some return BAD,
+      // some block, some deadlock under load — exact match for the
+      // "sometimes hangs" symptom users hit on getThread).
+      const mailboxState = client.mailbox as
+        | { exists?: number; uidValidity?: number | bigint }
+        | undefined
+        | false;
+      const total =
+        mailboxState && typeof mailboxState === 'object' ? mailboxState.exists ?? 0 : 0;
+      const rawValidity =
+        mailboxState && typeof mailboxState === 'object'
+          ? mailboxState.uidValidity
+          : undefined;
+      const uidValidity =
+        typeof rawValidity === 'bigint'
+          ? Number(rawValidity)
+          : (rawValidity as number | undefined);
       if (total === 0) return { threads: [], nextPageToken: null };
 
       // Decide between sequence-based pagination (fast) and search-based
@@ -496,6 +532,11 @@ export async function listThreads(
           totalReplies: 0,
           latest,
           messages: [latest],
+          // UID hint — lets the next `mail.get` skip the SEARCH HEADER scan.
+          // Both fields must be present together for the server to accept
+          // the hint; missing UIDVALIDITY = treat the hint as untrusted.
+          uid: typeof msg.uid === 'number' ? msg.uid : undefined,
+          uidValidity,
         });
       }
 
@@ -518,15 +559,67 @@ function hasAttachmentStructure(struct: unknown): boolean {
   return false;
 }
 
+/**
+ * Optional UID hint produced by `listThreads`. When the client passes one
+ * back, `getThread` resolves the message in a single FETCH instead of an
+ * O(N) SEARCH HEADER scan over the mailbox.
+ *
+ * Treated as untrusted: the server cross-checks UIDVALIDITY and the
+ * resolved Message-Id before accepting the row. Any mismatch falls back
+ * to the slow path.
+ */
+export interface UidHint {
+  uid: number;
+  uidValidity: number;
+}
+
+/**
+ * Normalize a Message-Id for equality comparison.
+ *
+ * IMAP envelope Message-Ids and URL-borne Message-Ids drift in two ways:
+ *   - Angle brackets: some IMAP servers strip them when populating ENVELOPE,
+ *     others keep them. The URL form `?threadId=%3C...%3E` decodes WITH
+ *     brackets. A bracketed vs unbracketed compare always fails for the
+ *     same logical id.
+ *   - Outer whitespace: rare but the spec allows it on the wire.
+ *
+ * Strip both before comparison so the UID-hint fast path can match
+ * regardless of whether the bracketed form ended up in either side.
+ * The local-part of a Message-Id is case-sensitive per RFC 5322 §3.6.4
+ * so we do NOT lowercase.
+ */
+function normalizeMessageId(id: string | null | undefined): string {
+  if (!id) return '';
+  let s = id.trim();
+  if (s.startsWith('<')) s = s.slice(1);
+  if (s.endsWith('>')) s = s.slice(0, -1);
+  return s.trim();
+}
+
+const GET_THREAD_DEBUG = process.env.IMAP_DEBUG === '1';
+
+function gtDebug(stage: string, extra?: Record<string, unknown>) {
+  if (!GET_THREAD_DEBUG) return;
+  const parts = [`[getThread] ${stage}`];
+  if (extra) parts.push(JSON.stringify(extra));
+  console.log(parts.join(' '));
+}
+
 export async function getThread(
   auth: ImapAuth,
   id: string,
   folder: FolderSlug = 'inbox',
+  hint?: UidHint,
 ): Promise<ThreadResponse | null> {
   const mailbox = folderToMailbox(folder);
+  const startedAt = performance.now();
+  const normalizedId = normalizeMessageId(id);
+  gtDebug('enter', { user: auth.user, host: auth.host, folder, mailbox, hasHint: !!hint, idLen: id.length });
 
   return withImap(auth, async (client) => {
+    const lockStart = performance.now();
     const lock = await client.getMailboxLock(mailbox);
+    gtDebug('lock acquired', { ms: Math.round(performance.now() - lockStart) });
     try {
       // Primary lookup is by RFC 822 Message-Id (stable across sessions).
       // Legacy drafts surfaced from `drafts.list` with a `uid:<n>` handle
@@ -537,29 +630,112 @@ export async function getThread(
       let msg;
       const uidMatch = /^uid:(\d+)$/.exec(id);
       if (uidMatch) {
+        const t0 = performance.now();
         msg = await client.fetchOne(
           uidMatch[1]!,
           { source: true, envelope: true, flags: true, internalDate: true },
           { uid: true },
         );
+        gtDebug('uid: path', { uid: uidMatch[1], ms: Math.round(performance.now() - t0), found: !!msg });
       } else {
-        const search = await client.search({ header: { 'message-id': id } }, { uid: true });
-        if (search && search.length > 0) {
-          const uid = search[search.length - 1];
-          msg = await client.fetchOne(
-            String(uid),
-            { source: true, envelope: true, flags: true, internalDate: true },
-            { uid: true },
-          );
-        } else if (/^\d+$/.test(id)) {
-          msg = await client.fetchOne(
-            id,
-            { source: true, envelope: true, flags: true, internalDate: true },
-            { uid: false },
-          );
+        // Fast path — `listThreads` passed us a UID hint along with the
+        // UIDVALIDITY it was captured against. Verify the validity matches
+        // the mailbox's current value, then fetch by UID directly. We
+        // compare normalized Message-Ids so angle-bracket drift between
+        // list-time (envelope) and get-time (URL) doesn't reject a match.
+        //
+        // CRITICAL: do NOT call `client.status(mailbox, …)` here. RFC 3501
+        // §6.3.10 forbids STATUS on the currently-selected mailbox, and
+        // Dovecot's behavior is version-dependent (some return BAD, some
+        // block on the SELECT state, some deadlock under load). We already
+        // hold a SELECT via `getMailboxLock` above — imapflow populates
+        // `client.mailbox.uidValidity` from the SELECT response, so just
+        // read it from there. Zero round-trips, no STATUS-on-selected
+        // foot-gun.
+        if (hint && Number.isFinite(hint.uid) && Number.isFinite(hint.uidValidity)) {
+          const mailboxState = client.mailbox as
+            | { uidValidity?: number | bigint }
+            | undefined
+            | false;
+          const rawValidity =
+            mailboxState && typeof mailboxState === 'object'
+              ? mailboxState.uidValidity
+              : undefined;
+          const currentValidity =
+            typeof rawValidity === 'bigint'
+              ? Number(rawValidity)
+              : (rawValidity as number | undefined);
+          gtDebug('hint: validity', {
+            currentValidity,
+            hintValidity: hint.uidValidity,
+            match: currentValidity === hint.uidValidity,
+          });
+          if (currentValidity === hint.uidValidity) {
+            const t1 = performance.now();
+            const candidate = await client.fetchOne(
+              String(hint.uid),
+              { source: true, envelope: true, flags: true, internalDate: true },
+              { uid: true },
+            );
+            const validCandidate =
+              candidate && typeof candidate === 'object' ? candidate : null;
+            const matchedMsgId = validCandidate
+              ? normalizeMessageId(validCandidate.envelope?.messageId) === normalizedId
+              : false;
+            gtDebug('hint: fetchOne', {
+              ms: Math.round(performance.now() - t1),
+              found: !!validCandidate,
+              envelopeMsgId: validCandidate?.envelope?.messageId,
+              expectedMsgId: id,
+              matched: matchedMsgId,
+            });
+            if (validCandidate && matchedMsgId) {
+              msg = validCandidate;
+            }
+          }
+        }
+        // Slow path — SEARCH HEADER MESSAGE-ID. Walks every message in the
+        // mailbox checking headers; expensive on large mailboxes without
+        // FTS, which is why the hint path above exists.
+        //
+        // We search BOTH the bracketed and unbracketed form so the lookup
+        // doesn't depend on which form the IMAP server stores internally
+        // (Dovecot keeps brackets, some servers strip them).
+        if (!msg) {
+          const t0 = performance.now();
+          let searchRaw = await client.search({ header: { 'message-id': id } }, { uid: true });
+          let search: number[] = Array.isArray(searchRaw) ? searchRaw : [];
+          if (search.length === 0 && normalizedId !== id) {
+            // Retry without angle brackets — some servers strip them in the
+            // header index even though the envelope keeps them.
+            searchRaw = await client.search({ header: { 'message-id': normalizedId } }, { uid: true });
+            search = Array.isArray(searchRaw) ? searchRaw : [];
+          }
+          gtDebug('slow: search', { ms: Math.round(performance.now() - t0), hits: search.length });
+          if (search.length > 0) {
+            const uid = search[search.length - 1];
+            const t1 = performance.now();
+            msg = await client.fetchOne(
+              String(uid),
+              { source: true, envelope: true, flags: true, internalDate: true },
+              { uid: true },
+            );
+            gtDebug('slow: fetchOne', { uid, ms: Math.round(performance.now() - t1), found: !!msg });
+          } else if (/^\d+$/.test(id)) {
+            msg = await client.fetchOne(
+              id,
+              { source: true, envelope: true, flags: true, internalDate: true },
+              { uid: false },
+            );
+            gtDebug('slow: seq fallback', { id, found: !!msg });
+          }
         }
       }
-      if (!msg || !msg.source) return null;
+      if (!msg || !msg.source) {
+        gtDebug('miss', { totalMs: Math.round(performance.now() - startedAt) });
+        return null;
+      }
+      gtDebug('hit', { totalMs: Math.round(performance.now() - startedAt), bytes: (msg.source as Buffer).length });
 
       const parsed = await simpleParser(msg.source as Buffer);
       const env = msg.envelope;

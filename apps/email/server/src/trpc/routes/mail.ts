@@ -98,9 +98,30 @@ export const mailRouter = router({
     // Accept any string for folder — the client passes route slugs like
     // `bin` and `draft` that aren't in our canonical enum; normalize them
     // server-side instead of 400'ing the request.
-    .input(z.object({ id: z.string().min(1), folder: z.string().optional() }))
+    .input(
+      z.object({
+        id: z.string().min(1),
+        folder: z.string().optional(),
+        // Optional UID hint sourced from a prior `list` response. Lets the
+        // server resolve the message in a single FETCH instead of doing a
+        // mailbox-wide SEARCH HEADER scan. Validated server-side: if
+        // UIDVALIDITY drifts or the resolved row's Message-Id doesn't
+        // match `id`, the slow path runs anyway.
+        uidHint: z
+          .object({
+            uid: z.number().int().positive(),
+            uidValidity: z.number().int().positive(),
+          })
+          .optional(),
+      }),
+    )
     .query(async ({ ctx, input }) => {
-      const detail = await getThread(ctx.imap, input.id, normalizeFolderSlug(input.folder));
+      const detail = await getThread(
+        ctx.imap,
+        input.id,
+        normalizeFolderSlug(input.folder),
+        input.uidHint,
+      );
       if (!detail) throw new TRPCError({ code: 'NOT_FOUND', message: 'Thread not found' });
       return detail;
     }),

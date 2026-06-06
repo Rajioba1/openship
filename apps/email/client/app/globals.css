@@ -1,11 +1,80 @@
-@import '@fontsource-variable/geist' layer(base);
 @import '@fontsource-variable/geist-mono' layer(base);
 
 /*
-  Automatic source detection should suffice, but for more control, check
-  the docs on Detecting classes in source files, namely `source(none)`:
-  https://tailwindcss.com/docs/detecting-classes-in-source-files
-*/
+ * Openship typography — same Gellix (Latin) + SF Arabic (RTL fallback)
+ * stack the dashboard uses. CSS font-fallback picks the first family
+ * that has a glyph for each codepoint, so listing them as
+ * `'Gellix', 'SF Arabic', …` makes Latin render in Gellix and Arabic
+ * fall through to SF Arabic automatically — no per-locale switching.
+ *
+ * Hosted on the same CDN as the dashboard. swap means text stays
+ * readable while the variable webfonts download.
+ */
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-Thin.woff2') format('woff2');
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Gellix';
+  src: url('https://cdn.oblien.com/fonts/Gellix-Black.woff2') format('woff2');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'SF Arabic';
+  src: local('SF Arabic'), local('SFArabic-Regular'),
+    url('https://cdn.oblien.com/fonts/SFArabic-Regular.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 @import 'tailwindcss';
 
 /* Plugins */
@@ -19,8 +88,9 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* Typography */
-  --font-geist-sans: 'Geist Variable', 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  /* Typography — Gellix for Latin, SF Arabic for Arabic-script fallback.
+     Mono kept as Geist Mono for code blocks. */
+  --font-openship-sans: 'Gellix', 'SF Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --font-geist-mono: 'Geist Mono Variable', 'Geist Mono', ui-monospace, SFMono-Regular, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
 
   /* Theme colors (light mode: default) */
@@ -177,7 +247,7 @@
   --radius-sm: calc(var(--radius) - 4px);
 
   /* Typography */
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-openship-sans);
   --font-mono: var(--font-geist-mono);
 
   /* Animations */

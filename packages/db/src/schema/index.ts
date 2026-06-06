@@ -6,4 +6,5 @@ export { domain } from "./domain";
 export { service, serviceDeployment } from "./service";
 export { userSettings, instanceSettings } from "./settings";
 export { servers } from "./servers";
+export { mailServers } from "./mail";
 export { serverAnalytics, serverAnalyticsGeo } from "./analytics";

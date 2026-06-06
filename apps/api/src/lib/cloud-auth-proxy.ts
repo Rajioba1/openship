@@ -90,12 +90,13 @@ async function createLocalSession(
   userId: string,
   ipAddress?: string,
   userAgent?: string,
-): Promise<{ token: string; expiresAt: Date }> {
+): Promise<{ id: string; token: string; expiresAt: Date }> {
+  const id = randomUUID();
   const token = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
   await db.insert(schema.session).values({
-    id: randomUUID(),
+    id,
     token,
     userId,
     expiresAt,
@@ -103,7 +104,7 @@ async function createLocalSession(
     userAgent: userAgent ?? null,
   });
 
-  return { token, expiresAt };
+  return { id, token, expiresAt };
 }
 
 // ─── One-time handoff codes (cloud-side generates, desktop-side consumes) ────

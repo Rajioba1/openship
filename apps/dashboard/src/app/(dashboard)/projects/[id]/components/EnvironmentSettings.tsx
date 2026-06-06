@@ -3,12 +3,23 @@ import React, { useMemo, useState, useEffect, useRef } from "react";
 import EnvironmentVariables from "@/components/import-project/EnvironmentVariables";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useToast } from "@/context/ToastContext";
-import { projectsApi } from "@/lib/api";
+import { projectsApi, serviceKind } from "@/lib/api";
 import generateIcon from "@/utils/icons";
 
 export const EnvironmentSettings: React.FC = () => {
-  const { environmentData, updateEnvironment, refreshEnvironment, id } = useProjectSettings();
+  const { environmentData, updateEnvironment, refreshEnvironment, id, servicesData } = useProjectSettings();
   const { showToast } = useToast();
+
+  // Workspace mode: a project counts as a monorepo workspace when any of
+  // its services is a sub-app (kind="monorepo"). When true, the env vars
+  // here cascade into every sub-app's deploy at build time — same merge
+  // chain compose services already use (project env → service env, with
+  // service env winning). Surface that semantic in the UI so operators
+  // know setting a var here applies to every sub-app under the workspace.
+  const isWorkspace = useMemo(
+    () => (servicesData.services ?? []).some((s) => serviceKind(s) === "monorepo"),
+    [servicesData.services],
+  );
   // Convert environmentData.envVars format to EnvironmentVariables format
   const savedEnvVars = useMemo(() => {
     const allEnvs: Array<{ key: string; value: string; visible: boolean }> = [];
@@ -228,6 +239,25 @@ export const EnvironmentSettings: React.FC = () => {
           </p>
         </div>
       </div>
+
+      {/* Workspace inheritance notice — only shown for monorepo projects.
+          The variables defined here are merged into every sub-app's env
+          at deploy time. Sub-app-specific vars (set on each sub-app's
+          editor) override on key collision. Same merge chain compose
+          services already use; just made explicit in the UI. */}
+      {isWorkspace && (
+        <div className="rounded-xl border border-border/50 bg-muted/20 p-4">
+          <h4 className="text-sm font-semibold text-foreground mb-1">
+            Workspace environment
+          </h4>
+          <p className="text-[13px] leading-relaxed text-muted-foreground">
+            These variables are merged into every sub-app at deploy time.
+            For sub-app-specific overrides, open a sub-app from the
+            Services tab and set its env there — sub-app values win on
+            key collision.
+          </p>
+        </div>
+      )}
 
       {/* Environment Variables Component */}
       <EnvironmentVariables

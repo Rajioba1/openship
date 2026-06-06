@@ -26,6 +26,12 @@ export const githubApi = {
   /** Poll device flow status */
   pollConnect: () => api.get<any>(endpoints.github.connectPoll),
 
-  /** Disconnect GitHub integration */
-  disconnect: () => api.post<any>(endpoints.github.disconnect),
+  /**
+   * Disconnect a GitHub source.
+   *   - "oauth" → remove the Openship App / OAuth account row
+   *   - "cli"   → suppress the gh CLI fallback (host config untouched)
+   *   - "all"   → both (default — preserves the old behavior)
+   */
+  disconnect: (source: "oauth" | "cli" | "all" = "all") =>
+    api.post<{ success: boolean; source: string }>(endpoints.github.disconnect, { source }),
 };

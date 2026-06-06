@@ -43,7 +43,7 @@ import { platform } from "../../lib/controller-helpers";
 import { env, internalApiUrl } from "../../config";
 import { resolveDeploymentRuntime, resolveDeploymentPlatform } from "../../lib/deployment-runtime";
 import { ensureManagedEdgeProxy } from "../../lib/managed-edge-proxy";
-import { encrypt, decrypt } from "../../lib/encryption";
+import { decryptEnvMap, encrypt } from "../../lib/encryption";
 import {
   buildProjectRouteDomains,
   createTrackedSslProvider,
@@ -52,22 +52,28 @@ import {
 } from "../../lib/routing-domains";
 import { normalizeTargetPath } from "../../lib/public-endpoints";
 import { withDefaults } from "../../lib/resources";
-import { getInstallationToken, resolveToken } from "../github/github.auth";
+import { resolveBuildGitToken } from "../github/clone-auth";
 import { getLatestCommit, getRepository } from "../github/github.service";
 import { pruneRetainedBareReleases } from "./release-retention";
 import * as sessionManager from "./session-manager";
-import { cleanupBuildArtifact, onFailure, onSuccess, onCancelled, type LifecycleContext } from "./deployment-lifecycle";
+import { onFailure, onSuccess, onCancelled, type LifecycleContext } from "./deployment-lifecycle";
+import {
+  collectDeploymentManifest,
+  executeCleanup,
+  type CleanupManifest,
+} from "../projects/project-cleanup.service";
 import { runPreflightChecks, type PreflightResult } from "./preflight";
 import { createBuildConfig } from "./build-config";
 import {
   executeComposePipeline,
   isLegacyComposeProject,
+  listProjectComposeServices,
+  projectServicesToDeployableServices,
   resolveProjectServicePreflightServices,
   shouldUseProjectServicePipeline,
 } from "./compose";
-import { applyMonorepoOverrides, resolveMonorepoPlan, persistMonorepoDeployMetadata } from "./monorepo";
 import * as settingsService from "../settings/settings.service";
-import type { ComposeService } from "../../lib/compose-parser";
+import { serviceKind, type DeployableService } from "../../lib/deployable-service";
 import {
   listProjectRouteRows,
   resolveProjectRouteState,
@@ -149,41 +155,6 @@ function collapseTerminalLogs(entries: LogEntry[]): LogEntry[] {
   return result;
 }
 
-async function resolveBuildGitToken(opts: {
-  userId: string;
-  owner?: string | null;
-  effectiveTarget: DeployTarget;
-}): Promise<string | null> {
-  const owner = opts.owner ?? undefined;
-
-  if (opts.effectiveTarget === "cloud") {
-    if (!owner) return null;
-    const token = await getInstallationToken(opts.userId, owner).catch((err) => {
-      const message = err instanceof Error ? err.message : "Unknown GitHub App error";
-      throw new AppError(
-        `Cannot access ${owner} with the GitHub App installation token: ${message}`,
-        403,
-        "GITHUB_APP_INSTALLATION_TOKEN_FAILED",
-      );
-    });
-
-    if (!token) {
-      throw new AppError(
-        `Cannot access ${owner} with the GitHub App. Install or reconnect the GitHub App for this owner and deploy again.`,
-        403,
-        "GITHUB_APP_INSTALLATION_REQUIRED",
-      );
-    }
-
-    return token;
-  }
-
-  return resolveToken({
-    userId: opts.userId,
-    owner,
-  }).catch(() => null);
-}
-
 function throwPreflightFailure(preflight: PreflightResult): never {
   const failedChecks = preflight.checks.filter((check) => check.status === "fail");
   const failures = failedChecks.map((check) => `${check.label}: ${check.message}`).join("; ");
@@ -209,6 +180,102 @@ export function metaWithPrevious(
 }
 
 /**
+ * Spawn the actual build pipeline for a freshly-queued deployment.
+ *
+ * Three callers (triggerDeployment, startBuild, redeployBuildSession) all
+ * need to: locate the build session, register the SSE channel, then
+ * fire-and-forget executeBuildAndDeploy with the safety-net error handler.
+ * Extracted so changes (telemetry, throttling, queueing) happen in one
+ * place instead of drifting across three.
+ *
+ * Returns the buildSessionId on success, or null when the build session
+ * row is missing. The caller decides whether to throw or carry on — for
+ * `redeploy` we want to skip silently; for `triggerDeployment` we throw.
+ */
+async function kickoffBuild(project: Project, dep: Deployment): Promise<string | null> {
+  const buildSession = await repos.deployment.findBuildSessionByDeploymentId(dep.id);
+  if (!buildSession) return null;
+
+  // Flip the row to "building" SYNCHRONOUSLY before firing the async
+  // `executeBuildAndDeploy`. Without this, callers that chain
+  // `redeployBuildSession` → `startBuild` (the dashboard does this on
+  // every redeploy, see [build/[id]/page.tsx][1]) hit a race:
+  //
+  //   1. redeployBuildSession creates dep (status="queued") and calls
+  //      kickoffBuild → fires executeBuildAndDeploy as `void`.
+  //   2. kickoffBuild returns; the row is STILL "queued" because the
+  //      async hasn't updated it yet.
+  //   3. Dashboard reads the new deployment_id and calls /build/:id which
+  //      runs startBuild → loadDeployment → status="queued" → falls through
+  //      the idempotency guard at line ~1045 → kickoffBuild AGAIN.
+  //   4. Two executeBuildAndDeploy in parallel for one deployment, both
+  //      provisioning workspaces and double-logging to the same SSE
+  //      stream — which is what users were seeing.
+  //
+  // [1]: apps/dashboard/src/app/(dashboard)/(deployment)/build/[id]/page.tsx
+  await repos.deployment.updateStatus(dep.id, "building").catch(() => {
+    // Best effort — if this fails, the worst case is the old race
+    // returns. executeBuildAndDeploy will set the status itself when it
+    // starts.
+  });
+  dep.status = "building";
+
+  sessionManager.createSession(dep.id, project.id);
+
+  void executeBuildAndDeploy(project, dep, buildSession.id).catch(async (err) => {
+    console.error(`[DEPLOY] Fatal error for ${dep.id}:`, err);
+    // executeBuildAndDeploy's inner try/catch only arms onFailure() after
+    // snapshot + route state resolve. Anything that throws before that
+    // (missing snapshot, route lookup crash, runtime resolution) would
+    // otherwise leave the row queued forever — this guarantees the
+    // deployment is marked failed and the SSE stream gets a closing
+    // message.
+    await markDeploymentFailedFromOutside(dep.id, err);
+  });
+
+  return buildSession.id;
+}
+
+/**
+ * Fallback failure handler for errors thrown out of executeBuildAndDeploy
+ * before its own try/catch arms onFailure(). Without this, an early
+ * snapshot/route-state crash would leave the deployment stuck at "queued"
+ * forever (the void .catch() just logged to console).
+ *
+ * Idempotent — if the deployment already reached "failed"/"ready"/"cancelled",
+ * skips. Otherwise marks failed, flushes a final log line through SSE so the
+ * dashboard stops spinning, and ends the session.
+ */
+async function markDeploymentFailedFromOutside(deploymentId: string, error: unknown): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    const dep = await repos.deployment.findById(deploymentId).catch(() => null);
+    if (!dep) return;
+    if (["failed", "ready", "cancelled"].includes(dep.status)) {
+      // Inner onFailure already ran (or the deploy somehow succeeded). Nothing to do.
+      return;
+    }
+    await repos.deployment.updateStatus(deploymentId, "failed").catch(() => {});
+    const buildSession = await repos.deployment.findBuildSessionByDeploymentId(deploymentId).catch(() => null);
+    if (buildSession) {
+      await repos.deployment.updateBuildSession(buildSession.id, {
+        status: "failed",
+        finishedAt: new Date(),
+      }).catch(() => {});
+    }
+    // SSE: surface the error to anyone watching the stream and close it.
+    sessionManager.appendLog(deploymentId, {
+      timestamp: new Date().toISOString(),
+      message: `Deployment failed before build started: ${message}`,
+      level: "error",
+    });
+    sessionManager.updateStatus(deploymentId, "failed");
+  } catch (handlerErr) {
+    console.error(`[DEPLOY] markDeploymentFailedFromOutside crashed for ${deploymentId}:`, handlerErr);
+  }
+}
+
+/**
  * Compose-vs-normal pipeline gate (single source of truth).
  * Single mode short-circuits; otherwise we resolve services + pipeline in parallel.
  */
@@ -218,7 +285,7 @@ async function resolveServicePipelineMode(
 ): Promise<{
   useSingleAppPipeline: boolean;
   useServicePipeline: boolean;
-  servicePreflightServices: ComposeService[];
+  servicePreflightServices: DeployableService[];
 }> {
   if (snapshot.serviceDeploymentMode === "single") {
     return { useSingleAppPipeline: true, useServicePipeline: false, servicePreflightServices: [] };
@@ -238,8 +305,12 @@ export async function runDeploymentPreflight(
   routeState: Awaited<ReturnType<typeof resolveProjectRouteState>>,
   opts: {
     userId: string;
-    composeServices?: ComposeService[];
+    composeServices?: DeployableService[];
     multiService?: boolean;
+    /** Git owner of the source repo. Cloud preflight uses it to verify the
+     *  GitHub App is installed for this owner before the build pipeline
+     *  spends resources cloning a repo it can't access. */
+    gitOwner?: string | null;
   },
 ): Promise<void> {
   const preflight = await runPreflightChecks(snapshot, {
@@ -252,6 +323,8 @@ export async function runDeploymentPreflight(
     publicEndpoints: routeState.publicEndpoints,
     ...(opts.composeServices ? { composeServices: opts.composeServices } : {}),
     ...(opts.multiService !== undefined ? { multiService: opts.multiService } : {}),
+    ...(opts.gitOwner !== undefined ? { gitOwner: opts.gitOwner } : {}),
+    buildStrategy: snapshot.buildStrategy as "local" | "server" | undefined,
   });
   if (!preflight.ok) {
     throwPreflightFailure(preflight);
@@ -318,8 +391,12 @@ export interface DeploymentConfigSnapshot {
   runtimeMode?: "bare" | "docker";
   /** Project services fan-out mode captured for this deployment. */
   serviceDeploymentMode?: "services" | "single";
-  /** Parsed compose services captured at deploy request time. */
-  composeServices?: ComposeService[];
+  /**
+   * Deployable services captured at deploy request time. Mixed shape:
+   * compose-source rows AND monorepo sub-app rows travel through the
+   * same pipeline, discriminated by `kind`. See `DeployableService`.
+   */
+  composeServices?: DeployableService[];
   /** Summary of a compose deployment fan-out, when applicable. */
   composeDeployment?: {
     totalServices: number;
@@ -348,7 +425,7 @@ export interface BuildAccessInput {
   serverId?: string;
   runtimeMode?: "bare" | "docker";
   serviceDeploymentMode?: "services" | "single";
-  services?: ComposeService[];
+  services?: DeployableService[];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -457,19 +534,11 @@ export function encryptEnvVars(envVars?: Record<string, string>): Record<string,
   return encrypted;
 }
 
-/** Decrypt an encrypted env var map from deployment.envVars. */
-function decryptEnvVars(encrypted: unknown): Record<string, string> {
-  const map: Record<string, string> = {};
-  if (!encrypted || typeof encrypted !== "object") return map;
-  for (const [k, v] of Object.entries(encrypted as Record<string, string>)) {
-    try {
-      map[k] = decrypt(v);
-    } catch {
-      map[k] = v;
-    }
-  }
-  return map;
-}
+// `decryptEnvVars` used to live here with a worse error behavior — on a
+// decryption failure it returned the raw ciphertext as the value, which
+// could leak sealed bytes into the build environment. The canonical
+// implementation in lib/encryption.ts (decryptEnvMap) drops failed keys
+// instead. Callers below use that directly via the import in this file.
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -636,16 +705,6 @@ export async function requestBuildAccess(userId: string, input: BuildAccessInput
     snapshot.deployTarget = deployTarget;
   }
   if (serverId) {
-    // Refuse to deploy to a server that doesn't host apps. Mail-only servers
-    // run iRedMail and are provisioned via the mail-server install pipeline,
-    // not the standard Docker / bare-runtime flow. Servers that run BOTH
-    // apps + mail (runsApps && runsMail) accept app deploys normally.
-    const targetServer = await repos.server.get(serverId);
-    if (targetServer && !targetServer.runsApps) {
-      throw new Error(
-        `Server "${targetServer.name ?? targetServer.sshHost}" is configured as a mail-only server and cannot be used as an app deploy target. Enable "Runs apps" on this server, or select a different one.`,
-      );
-    }
     snapshot.serverId = serverId;
   }
   if (runtimeMode) {
@@ -657,6 +716,7 @@ export async function requestBuildAccess(userId: string, input: BuildAccessInput
     userId,
     composeServices: servicePreflightServices,
     multiService: useServicePipeline,
+    gitOwner: project.gitOwner,
   });
   const env = environment || "production";
 
@@ -871,7 +931,7 @@ export async function getBuildSessionStatus(deploymentId: string, userId: string
 // ─── Cancel build session ────────────────────────────────────────────────────
 
 export async function cancelBuildSession(deploymentId: string, userId: string) {
-  const { dep } = await loadDeploymentForUser(deploymentId, userId);
+  const { dep, project } = await loadDeploymentForUser(deploymentId, userId);
 
   if (!["queued", "building", "deploying"].includes(dep.status)) {
     throw new ForbiddenError("Cannot cancel a deployment that is not in progress");
@@ -879,22 +939,36 @@ export async function cancelBuildSession(deploymentId: string, userId: string) {
 
   const buildSession = await repos.deployment.findBuildSessionByDeploymentId(deploymentId);
 
+  // 1. Abort the running build process. Best-effort — if the build already
+  //    finished or never started this is a no-op.
   const { runtime } = platform();
-  if (dep.status === "building") {
-    if (buildSession) {
-      await runtime.cancelBuild(buildSession.id).catch(() => {});
-    }
-  }
-  if (dep.imageRef) {
-    await cleanupBuildArtifact(runtime, dep.imageRef).catch(() => {});
-  }
-  if (dep.containerId) {
-    await runtime.destroy(dep.containerId).catch(() => {});
+  if (dep.status === "building" && buildSession) {
+    await runtime.cancelBuild(buildSession.id).catch(() => {});
   }
 
+  // 2. Tear down whatever the deploy had already provisioned. The shared
+  //    deployment manifest enumerates ALL containers (deployment + each
+  //    service) and ALL images (deployment + each service's built image),
+  //    deduplicated. Before this refactor cancel only touched dep.imageRef
+  //    and dep.containerId, leaking per-service images/containers from
+  //    compose deploys that died mid-pipeline. Volumes are deliberately
+  //    NOT cleaned — cancel != delete, and the user may retry.
+  const manifest = await collectDeploymentManifest(dep, project).catch(
+    (): CleanupManifest => ({ projectId: dep.projectId, resources: [] }),
+  );
+  if (manifest.resources.length > 0) {
+    await executeCleanup(manifest).catch((err) => {
+      // Per-item failures are already isolated inside executeCleanup, so we
+      // only land here on an unexpected crash. Log and continue — cancel
+      // still has to mark the deployment cancelled, leak or no leak.
+      console.error(`[CANCEL] Cleanup crashed for ${dep.id}:`, err);
+    });
+  }
+
+  // 3. Surface service-level cancellation in the SSE stream so the UI stops
+  //    showing per-service spinners.
   const snapshot = dep.meta as DeploymentConfigSnapshot | null;
   if (snapshot?.serviceDeploymentMode !== "single") {
-    // Mark all pending/building services as failed so UI stops showing spinners
     const services = await repos.service.listByProject(dep.projectId).catch(() => []);
     for (const svc of services) {
       sessionManager.broadcastServiceStatus(dep.id, {
@@ -906,11 +980,11 @@ export async function cancelBuildSession(deploymentId: string, userId: string) {
     }
   }
 
+  // 4. Persist the cancelled status + close the SSE stream.
   await repos.deployment.updateStatus(dep.id, "cancelled");
   if (buildSession) {
     await repos.deployment.finishBuildSession(buildSession.id, "cancelled", 0);
   }
-
   // Broadcast cancelled AFTER service statuses so UI receives the service updates first
   sessionManager.updateStatus(dep.id, "cancelled");
 
@@ -930,6 +1004,30 @@ export async function redeployBuildSession(deploymentId: string, userId: string)
   const branch = meta.branch || resolvedBranch;
   const { commitSha, commitMessage } = await resolveLatestCommitInfo(userId, project, branch);
 
+  // ── Refresh compose services from current DB state ─────────────────────
+  // The old snapshot's `composeServices` is frozen to whatever existed when
+  // it was created. If the user added (or disabled) a service since then,
+  // the redeploy must see the current shape — otherwise newly-added Postgres
+  // / Redis / etc. rows would sit in the DB but never actually deploy.
+  //
+  // Since the monorepo fan-out unification, listProjectComposeServices
+  // returns BOTH kind="compose" AND kind="monorepo" rows. So this refresh
+  // picks up newly-added sub-apps too (e.g. a user adding `apps/admin` to
+  // a project that previously had only `apps/web`).
+  //
+  // We deliberately don't touch `serviceDeploymentMode` — the downstream
+  // pipeline gate (shouldUseProjectServicePipeline) re-queries the DB and
+  // chooses the right mode regardless. Forcing it here would silently
+  // override an explicit user choice on the original deployment.
+  const currentComposeRows = await listProjectComposeServices(project.id).catch(() => []);
+  const currentComposeServices = projectServicesToDeployableServices(
+    currentComposeRows.filter((s) => s.enabled),
+  );
+  const refreshedMeta: DeploymentConfigSnapshot = {
+    ...meta,
+    composeServices: currentComposeServices.length > 0 ? currentComposeServices : undefined,
+  };
+
   const dep = await createQueuedDeployment({
     projectId: project.id,
     userId,
@@ -938,10 +1036,18 @@ export async function redeployBuildSession(deploymentId: string, userId: string)
     commitMessage,
     trigger: "redeploy",
     environment: oldDep.environment,
-    framework: oldDep.framework || meta.framework,
-    meta: metaWithPrevious(meta, project),
+    framework: oldDep.framework || refreshedMeta.framework,
+    meta: metaWithPrevious(refreshedMeta, project),
     envVars: oldDep.envVars as Record<string, string> | null,
   });
+
+  // Kick off the actual build. Without this, the new deployment row would
+  // sit in "queued" status forever — the main deploy UI worked around this
+  // by following up with POST /:id/build, but the dashboard's auto-redeploy
+  // call sites (ServicesTab, ServiceDetailPanel) don't, and end-users see
+  // a stuck "Queued" pill. startBuild is idempotent (see its guard below),
+  // so the main UI's follow-up POST is a no-op instead of an error.
+  await kickoffBuild(project, dep);
 
   return {
     success: true,
@@ -955,19 +1061,26 @@ export async function redeployBuildSession(deploymentId: string, userId: string)
 export async function startBuild(deploymentId: string, userId: string) {
   const { dep, project } = await loadDeploymentForUser(deploymentId, userId);
 
-  if (!["queued"].includes(dep.status)) {
-    throw new ForbiddenError("Build session is not in queued state");
+  // Idempotent for already-running / completed deployments. redeploy now
+  // auto-triggers the build, but the existing main-deploy UI still POSTs
+  // /:id/build right after to attach its SSE stream — we want that POST to
+  // succeed (so SSE attaches to the running session) instead of 400'ing.
+  // Terminal states (ready/failed/cancelled) are also "do nothing, return ok".
+  if (["building", "deploying", "ready", "failed", "cancelled"].includes(dep.status)) {
+    return {
+      success: true,
+      deployment_id: dep.id,
+      project_id: project.id,
+      alreadyStarted: true as const,
+    };
   }
 
-  const buildSession = await repos.deployment.findBuildSessionByDeploymentId(deploymentId);
-  if (!buildSession) throw new NotFoundError("BuildSession for deployment", deploymentId);
+  if (!["queued"].includes(dep.status)) {
+    throw new ForbiddenError(`Build session is in an unexpected state: ${dep.status}`);
+  }
 
-  // Create SSE session keyed by deployment ID
-  sessionManager.createSession(dep.id, project.id);
-
-  void executeBuildAndDeploy(project, dep, buildSession.id).catch((err) => {
-    console.error(`[DEPLOY] Fatal error for ${dep.id}:`, err);
-  });
+  const buildSessionId = await kickoffBuild(project, dep);
+  if (!buildSessionId) throw new NotFoundError("BuildSession for deployment", deploymentId);
 
   return {
     success: true,
@@ -1007,7 +1120,10 @@ export async function triggerDeployment(
   const routeState = await resolveProjectRouteState(project);
 
   // ── Preflight: validate config before creating any resources ────
-  await runDeploymentPreflight(snapshot, routeState, { userId });
+  await runDeploymentPreflight(snapshot, routeState, {
+    userId,
+    gitOwner: project.gitOwner,
+  });
 
   // Copy env vars from project (already encrypted in env_var table)
   const rawEnvMap = await repos.project.getEnvMap(project.id, environment);
@@ -1035,15 +1151,8 @@ export async function triggerDeployment(
     envVars: encryptedEnvVars,
   });
 
-  const buildSess = await repos.deployment.findBuildSessionByDeploymentId(dep.id);
-  if (!buildSess) throw new Error("Build session was not created");
-
-  // Create SSE session keyed by deployment ID
-  sessionManager.createSession(dep.id, project.id);
-
-  void executeBuildAndDeploy(project, dep, buildSess.id).catch((err) => {
-    console.error(`[DEPLOY] Fatal error for ${dep.id}:`, err);
-  });
+  const buildSessionId = await kickoffBuild(project, dep);
+  if (!buildSessionId) throw new Error("Build session was not created");
 
   return {
     deployment: dep,
@@ -1101,7 +1210,6 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     system = resolved.platform.system;
     ctx.runtime = runtime;
 
-    const effectiveTarget = resolved.effectiveTarget;
     const usesManagedRouting = resolved.usesManagedRouting;
     const targetExecutor: CommandExecutor | null = resolved.platform.executor;
 
@@ -1116,8 +1224,16 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     const prodResources = withDefaults(snapshot.resources);
     const buildResources = withDefaults(snapshot.buildResources, DEFAULT_BUILD_RESOURCE_CONFIG);
 
-    // Decrypt env vars from deployment (self-contained)
-    const envMap = decryptEnvVars(dep.envVars);
+    // Decrypt env vars from deployment (self-contained). decryptEnvMap
+    // drops keys that fail decryption rather than leaking ciphertext into
+    // the build environment.
+    const envMap = decryptEnvMap(
+      (dep.envVars ?? {}) as Record<string, string>,
+      (key: string, err: unknown) =>
+        console.warn(
+          `[build] failed to decrypt env var ${key}: ${err instanceof Error ? err.message : err}`,
+        ),
+    );
     const isLocalBuild = snapshot.buildStrategy === "local";
     const buildEnv = buildScopedEnvVars(envMap, {
       forceProductionNodeEnv: isLocalBuild,
@@ -1131,50 +1247,45 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     }
 
     // Resolve a fresh GitHub token for cloning private repos.
-    // Cloud/SaaS builds must use GitHub App installation tokens; local/server
-    // builds keep the user's configured local/OAuth/token resolver.
+    // Policy lives in resolveBuildGitToken — local builds keep the broad
+    // resolver chain (token never leaves the API); remote builds in App
+    // mode are installation-only; remote builds in non-App modes still
+    // ship the user's token but the preflight check warns first.
     const gitToken = await resolveBuildGitToken({
       userId: dep.userId,
+      projectId: project.id,
       owner: project.gitOwner ?? undefined,
-      effectiveTarget,
+      buildStrategy: snapshot.buildStrategy ?? "server",
     });
 
-    // ── Monorepo override ─────────────────────────────────────────────
-    // When the project has enabled monorepo sub-app rows, we deploy the
-    // primary (lowest sortOrder) one through the single-app pipeline with
-    // its commands + the shared workspace install. The remaining sub-apps
-    // are persisted but skipped this turn; the next iteration will add
-    // multi-workload fan-out.
-    const monorepoPlan = await resolveMonorepoPlan(project);
-    const effectiveSnapshot = monorepoPlan
-      ? applyMonorepoOverrides(snapshot, monorepoPlan)
-      : snapshot;
-    if (monorepoPlan) {
-      logger.log(
-        `Monorepo deploy — primary app: ${monorepoPlan.primaryAppName} (root: ${monorepoPlan.rootDirectory}). ` +
-          (monorepoPlan.pendingAppNames.length > 0
-            ? `Pending apps queued for future fan-out: ${monorepoPlan.pendingAppNames.join(", ")}.\n`
-            : "\n"),
-        "info",
-      );
-      await persistMonorepoDeployMetadata(project.id, monorepoPlan);
-    }
+    // Monorepo sub-app rows (kind="monorepo") fan out through the standard
+    // compose pipeline below — each gets its own image, container, and
+    // route. Per-app build/start commands live on the service row; no
+    // project-row mirroring needed and no snapshot mutation here.
 
     const buildConfig = createBuildConfig({
       project,
       dep,
-      snapshot: effectiveSnapshot,
+      snapshot,
       sessionId: buildSessionId,
       envVars: buildEnv.envVars,
       resources: buildResources,
       gitToken: gitToken ?? undefined,
     });
 
-    const useServicePipeline = (await resolveServicePipelineMode(project, effectiveSnapshot)).useServicePipeline;
+    const useServicePipeline = (await resolveServicePipelineMode(project, snapshot)).useServicePipeline;
 
     if (useServicePipeline && isMultiServiceRuntime(runtime)) {
-      if (snapshot.composeServices?.length) {
-        await repos.service.syncFromCompose(project.id, snapshot.composeServices);
+      // snapshot.composeServices is a DeployableService[] — mixed compose +
+      // monorepo. syncFromCompose strictly owns compose rows; passing a
+      // monorepo entry in causes a ghost compose-kind row to be inserted
+      // alongside the real monorepo row (no DB unique constraint on
+      // (projectId, name)). Filter to compose-kind before handing it off.
+      const composeOnly = snapshot.composeServices?.filter(
+        (s) => serviceKind(s) === "compose",
+      );
+      if (composeOnly?.length) {
+        await repos.service.syncFromCompose(project.id, composeOnly);
       }
 
       await executeComposePipeline({
@@ -1203,7 +1314,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       return;
     }
 
-    if (!effectiveSnapshot.hasBuild) {
+    if (!snapshot.hasBuild) {
       logger.step(
         "build",
         "completed",
@@ -1243,7 +1354,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       ctx,
       project,
       dep,
-      snapshot: effectiveSnapshot,
+      snapshot: snapshot,
       buildSessionId,
       runtime,
       routing,
@@ -1258,7 +1369,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       logger,
     };
 
-    if (!effectiveSnapshot.hasServer && runtime instanceof CloudRuntime) {
+    if (!snapshot.hasServer && runtime instanceof CloudRuntime) {
       await executeStaticEdgeDeploy(phase, runtime);
     } else {
       await executeServerDeploy(phase);

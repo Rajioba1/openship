@@ -5,8 +5,23 @@ import { endpoints } from "./endpoints";
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Narrow a service row's `kind` to the discriminator type. Anything that
+ * isn't "monorepo" is treated as "compose" — matches the backend default
+ * and the schema's nullable column. One helper so dashboard sites don't
+ * hand-roll the same `kind === "monorepo" ? "monorepo" : "compose"`
+ * ternary inline.
+ */
+export function serviceKind(
+  service: { kind?: "compose" | "monorepo" | string | null } | null | undefined,
+): "compose" | "monorepo" {
+  return service?.kind === "monorepo" ? "monorepo" : "compose";
+}
+
 export interface Service {
   id: string;
+  /** Discriminator. "compose" (default) or "monorepo" sub-app. */
+  kind?: "compose" | "monorepo";
   name: string;
   image: string | null;
   build: string | null;
@@ -24,6 +39,15 @@ export interface Service {
   domainType: "free" | "custom" | null;
   enabled: boolean;
   sortOrder: number;
+  /* ── Monorepo sub-app fields (kind === "monorepo" only) ─────────── */
+  rootDirectory?: string | null;
+  installCommand?: string | null;
+  buildCommand?: string | null;
+  startCommand?: string | null;
+  outputDirectory?: string | null;
+  framework?: string | null;
+  packageManager?: string | null;
+  buildImage?: string | null;
 }
 
 export interface ServiceContainer {
@@ -46,6 +70,12 @@ export interface ServiceEnvVar {
 
 export type ServiceInput = {
   name: string;
+  /**
+   * Row discriminator. Pass "monorepo" to create a source-built sub-app
+   * (requires rootDirectory). Defaults to "compose" if omitted, matching
+   * the backend default and historical behavior.
+   */
+  kind?: "compose" | "monorepo";
   image?: string;
   build?: string;
   dockerfile?: string;
@@ -62,6 +92,17 @@ export type ServiceInput = {
   domainType?: "free" | "custom";
   enabled?: boolean;
   sortOrder?: number;
+  /* ── Monorepo sub-app build settings (kind="monorepo" only) ─────────
+   * Optional so existing compose service create/update calls don't need
+   * to change. Backend (UpdateServiceBody schema) accepts the same set. */
+  rootDirectory?: string;
+  installCommand?: string;
+  buildCommand?: string;
+  startCommand?: string;
+  outputDirectory?: string;
+  framework?: string;
+  packageManager?: string;
+  buildImage?: string;
 };
 
 /* ------------------------------------------------------------------ */
@@ -81,16 +122,32 @@ export const servicesApi = {
   create: (projectId: string | number, data: ServiceInput) =>
     api.post<{ success: boolean; service: Service }>(endpoints.services.create(projectId), data),
 
-  /** Update a service configuration */
+  /**
+   * Update a service configuration.
+   *
+   * Strips `kind` from the payload because the backend's UpdateServiceBody
+   * validator rejects it — flipping a row's kind would invalidate the
+   * "compose-rows-have-null-monorepo-fields" invariant and bypass the
+   * create-time rootDirectory guard. Switching kind is a delete+recreate
+   * operation, not a patch. Stripping client-side is the cheapest way to
+   * keep the ServiceEditorModal payload shape uniform between create
+   * and edit without sprouting kind-omitting branches all over.
+   */
   update: (
     projectId: string | number,
     serviceId: string,
-    data: Partial<Service> | Partial<ServiceInput>,
-  ) =>
-    api.patch<{ success: boolean; service: Service }>(
+    data: Partial<ServiceInput>,
+  ) => {
+    // Strip `kind` defensively. The backend validator rejects unknown
+    // and disallowed keys (additionalProperties:false on UpdateServiceBody),
+    // but stripping client-side keeps a uniform payload shape between
+    // the modal's create and edit branches.
+    const { kind: _kind, ...rest } = data as { kind?: unknown } & Record<string, unknown>;
+    return api.patch<{ success: boolean; service: Service }>(
       endpoints.services.update(projectId, serviceId),
-      data,
-    ),
+      rest,
+    );
+  },
 
   /** Delete a service */
   delete: (projectId: string | number, serviceId: string) =>

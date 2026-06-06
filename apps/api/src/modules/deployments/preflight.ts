@@ -16,9 +16,11 @@ import { platform } from "../../lib/controller-helpers";
 import { resolveServiceHostnameLabel } from "@repo/core";
 import { getCloudPreflight } from "../../lib/cloud-client";
 import { runCloudPreflight, type CloudPreflightData } from "../../lib/cloud-preflight";
-import type { ComposeService } from "../../lib/compose-parser";
+import type { DeployableService } from "../../lib/deployable-service";
+import { serviceKind } from "./compose/project-services";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { normalizeTargetPath } from "../../lib/public-endpoints";
+import { getInstallationId, getGitHubAuthMode, getInstallUrl } from "../github/github.auth";
 
 export interface PreflightCheck {
   id: string;
@@ -32,6 +34,8 @@ export const PREFLIGHT_ERROR_CODES = {
   CLOUD_REQUIRED_TARGET: "CLOUD_REQUIRED_TARGET",
   CLOUD_REQUIRED_MANAGED_PROJECT_DOMAIN: "CLOUD_REQUIRED_MANAGED_PROJECT_DOMAIN",
   CLOUD_REQUIRED_MANAGED_COMPOSE_DOMAINS: "CLOUD_REQUIRED_MANAGED_COMPOSE_DOMAINS",
+  GITHUB_APP_INSTALLATION_REQUIRED: "GITHUB_APP_INSTALLATION_REQUIRED",
+  REMOTE_BUILD_TOKEN_LEAK_RISK: "REMOTE_BUILD_TOKEN_LEAK_RISK",
 } as const;
 
 export interface PreflightResult {
@@ -50,8 +54,104 @@ export interface PreflightOptions {
     customDomain?: string;
     domainType?: "free" | "custom";
   }>;
-  composeServices?: ComposeService[];
+  composeServices?: DeployableService[];
   multiService?: boolean;
+  /** Git owner (org / user) for the project's source repo. When the
+   *  deployment targets cloud, we check that the GitHub App is installed
+   *  on this owner — otherwise the build will fail with a token error
+   *  AFTER provisioning resources. Catching it here surfaces a clear
+   *  "install the App on <owner>" message and skips the wasted work. */
+  gitOwner?: string | null;
+  /** Whether the build runs on the API host (`local`) or on the deploy
+   *  target (`server`). For non-App auth modes, only `local` keeps the
+   *  user's broad-scope token from leaving the API process. */
+  buildStrategy?: "local" | "server";
+}
+
+/**
+ * Check the GitHub App is installed for the project's owner. Cloud builds
+ * REQUIRE an installation token (no OAuth fallback — sending a long-lived
+ * user-scope token to cloud infra would be too broad). If the owner has
+ * no installation row, every cloud build for this project will fail with
+ * a 403 from `resolveBuildGitToken`. Catch it in preflight so the user
+ * sees an actionable message + the install URL.
+ */
+async function checkGitHubAppInstallation(
+  userId: string | undefined,
+  owner: string | null | undefined,
+): Promise<PreflightCheck> {
+  const baseCheck = {
+    id: "github-app-installation",
+    label: "GitHub App access",
+  };
+  if (!userId) {
+    return { ...baseCheck, status: "warn", message: "User session missing — skipping check." };
+  }
+  if (!owner) {
+    return { ...baseCheck, status: "pass" };
+  }
+  // GitHub App auth is only used when the API runs in cloud/saas mode.
+  // Self-hosted instances use OAuth/token resolvers and don't need an
+  // installation per owner; preflight here would be a false positive.
+  if (getGitHubAuthMode() !== "app") {
+    return { ...baseCheck, status: "pass" };
+  }
+  const installationId = await getInstallationId(userId, owner).catch(() => null);
+  if (installationId) {
+    return { ...baseCheck, status: "pass" };
+  }
+  return {
+    ...baseCheck,
+    status: "fail",
+    code: PREFLIGHT_ERROR_CODES.GITHUB_APP_INSTALLATION_REQUIRED,
+    message:
+      `The Openship GitHub App is not installed on "${owner}". ` +
+      `Cloud deploys need it to mint a scoped token for cloning the repo. ` +
+      `Install it at ${getInstallUrl()} and deploy again.`,
+  };
+}
+
+/**
+ * Warn when a deploy will ship the user's broad-scope token to a remote
+ * build worker. This happens specifically when:
+ *
+ *   - The API runs in a non-App mode (oauth / cli / token) — no short-lived
+ *     installation token exists to mint.
+ *   - The build runs on the deploy target (`buildStrategy === "server"`),
+ *     not on the API host — so the token has to travel.
+ *   - The deploy target is remote (not the same host as the API).
+ *
+ * In that combination, today we ship the OAuth / gh / static PAT to the
+ * remote target as `x-access-token` for clone. That token has access to
+ * the user's entire GitHub footprint. A future phase will route this via
+ * API-proxied clone + tarball ship so no token leaves the API process.
+ * Until then, this preflight check surfaces the trade-off and recommends
+ * switching to `buildStrategy=local` (which is already safe).
+ */
+function checkRemoteBuildTokenLeak(
+  effectiveTarget: string,
+  buildStrategy: "local" | "server" | undefined,
+): PreflightCheck {
+  const baseCheck = {
+    id: "remote-build-token",
+    label: "Remote build credential",
+  };
+  const mode = getGitHubAuthMode();
+  // App mode already handles this safely via short-lived installation tokens.
+  // Local builds never ship the token. Cloud target with server build also
+  // uses installation tokens (or fails preflight via the App check above).
+  if (mode === "app") return { ...baseCheck, status: "pass" };
+  if (buildStrategy === "local") return { ...baseCheck, status: "pass" };
+  if (effectiveTarget === "cloud") return { ...baseCheck, status: "pass" };
+  // Remote target + server build + non-App mode → broad token ships.
+  return {
+    ...baseCheck,
+    status: "warn",
+    message:
+      `Building on the remote target will ship your GitHub credential there. ` +
+      `Switch to "Build on this machine" (buildStrategy=local) to keep the token ` +
+      `on the API host, or install the GitHub App to mint short-lived per-repo tokens.`,
+  };
 }
 
 async function checkPublicEndpoints(
@@ -222,7 +322,7 @@ async function checkPublicEndpoints(
 }
 
 async function checkComposeServiceDomains(
-  composeServices: ComposeService[],
+  composeServices: DeployableService[],
   projectSlug: string | undefined,
   cloud: CloudPreflightData | null,
   snapshot?: DeploymentConfigSnapshot,
@@ -260,6 +360,7 @@ async function checkComposeServiceDomains(
       projectSlug || "project",
       service.name,
       service.domain,
+      serviceKind(service),
     );
     const fqdn = `${subdomain}.${baseDomain}`;
 
@@ -364,6 +465,51 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
         label: "Service configuration",
         status: "fail",
         message: `Missing required fields: ${missing.join(", ")}`,
+      };
+    }
+
+    // Monorepo sub-app sanity: every kind="monorepo" row with a buildable
+    // shape must end up with an installCommand somewhere — either set on
+    // the row itself OR inherited from the project-level snapshot. Without
+    // that, the runtime synthesizes a Dockerfile that runs an empty install
+    // step and fails opaquely deep into the build. Surface the missing
+    // value here so the operator sees "sub-app X has no install command"
+    // before resources are provisioned.
+    const subAppFailures: string[] = [];
+    for (const svc of opts.composeServices ?? []) {
+      if (svc.kind !== "monorepo") continue;
+      // Disabled sub-apps never run; skip. `enabled === false` is the
+      // explicit opt-out — `exposed` is a routing concept (does the
+      // sub-app get a public URL) and conflating them lets enabled-but-
+      // not-exposed sub-apps slip past this check with no install command.
+      if (svc.enabled === false) continue;
+      if (!svc.rootDirectory) {
+        subAppFailures.push(`sub-app "${svc.name}" missing rootDirectory`);
+        continue;
+      }
+      const installFallback = svc.installCommand ?? snapshot.installCommand;
+      const buildFallback = svc.buildCommand ?? snapshot.buildCommand;
+      const startFallback = svc.startCommand ?? snapshot.startCommand;
+      // hasBuild/hasServer aren't per-service today — fall back to the
+      // project-level booleans on the snapshot. Conservative: if either
+      // the project says it has a build OR has a server, the sub-app must
+      // expose enough commands to honor that contract.
+      if (snapshot.hasBuild && !installFallback) {
+        subAppFailures.push(`sub-app "${svc.name}" missing install command`);
+      }
+      if (snapshot.hasBuild && !buildFallback) {
+        subAppFailures.push(`sub-app "${svc.name}" missing build command`);
+      }
+      if (snapshot.hasServer && !startFallback) {
+        subAppFailures.push(`sub-app "${svc.name}" missing start command`);
+      }
+    }
+    if (subAppFailures.length > 0) {
+      return {
+        id: "config",
+        label: "Service configuration",
+        status: "fail",
+        message: subAppFailures.join("; "),
       };
     }
 
@@ -664,6 +810,28 @@ export async function runPreflightChecks(
   }
 
   checks.push(await checkCloudRuntime(cloudPreflight, cloudRequirement));
+
+  // GitHub App installation check — fires whenever the API is running in
+  // App auth mode (SaaS), regardless of deploy target. Previously this was
+  // gated on `effectiveTarget === "cloud"`, but the App installation token
+  // is also the only credential we're willing to ship downstream for
+  // self-hosted deploys originating from a SaaS API — see resolveBuildGitToken
+  // in build.service.ts. Catching it here surfaces a clear "install the App
+  // on <owner>" error instead of a 403 deep in the build pipeline.
+  if (getGitHubAuthMode() === "app") {
+    checks.push(await checkGitHubAppInstallation(opts?.userId, opts?.gitOwner));
+  }
+
+  // Non-App-mode remote build → warn about the broad-token leak path. Doesn't
+  // fail the deploy; surfaces the trade-off so users can switch to local
+  // build (safe) or install the App (also safe). No-op for App mode and
+  // local builds.
+  checks.push(
+    checkRemoteBuildTokenLeak(
+      effectiveTarget,
+      opts?.buildStrategy ?? (snapshot.buildStrategy as "local" | "server" | undefined),
+    ),
+  );
 
   if (!hasEndpointRouting && opts?.customDomain) {
     checks.push(await checkCustomDomain(opts.customDomain, cloudPreflight, snapshot));

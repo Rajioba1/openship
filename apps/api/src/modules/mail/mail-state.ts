@@ -45,12 +45,32 @@ const STATE_VERSION = 1;
 export interface MailWebmailState {
   /** True once deploy succeeded end-to-end and health check passed. */
   installed: boolean;
-  /** openship serverId hosting the Zero process. */
+  /**
+   * Where the webmail runs.
+   *   "self"  — operator-managed server (this mail VPS or another openship server).
+   *   "cloud" — Opshcloud-managed, behind an *.opsh.io URL.
+   *
+   * Defaults to "self" when missing (legacy state files from before the
+   * cloud flow shipped).
+   */
+  target?: "self" | "cloud";
+  /**
+   * openship serverId hosting the Zero process. For target="cloud" this
+   * is the empty string — there is no openship server, the workload lives
+   * inside Opshcloud.
+   */
   targetServerId: string;
   /** Public hostname the operator typed into the deploy modal. */
   hostname: string;
   /** Browser URL, e.g. https://mail.oblien.com/. */
   url: string;
+  /**
+   * For target="cloud", the *.opsh.io URL Opshcloud minted for this deploy.
+   * When `hostname` is the mail server's own `mail.<domain>` subdomain (DNS
+   * already pinned to the mail VPS for IMAP/SMTP), the mail server's
+   * OpenResty proxies that hostname → this URL.
+   */
+  cloudUrl?: string;
   /** Internal port the Zero server binds to on the target host. */
   internalPort: number;
   /** Shared admin secret for openship → Zero PATCH /admin/branding. */

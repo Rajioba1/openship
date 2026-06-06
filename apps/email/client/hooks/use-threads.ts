@@ -1,5 +1,5 @@
 import { backgroundQueueAtom, isThreadInBackgroundQueueAtom } from '@/store/backgroundQueue';
-import { useInfiniteQuery, useQuery, useMutation } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { IGetThreadResponse } from '../../server/src/lib/driver/types';
 import { useSearchValue } from '@/hooks/use-search-value';
 import { useTRPC } from '@/providers/query-provider';
@@ -72,6 +72,7 @@ export const useThread = (threadId: string | null, options?: { enabled?: boolean
   const [_threadId] = useQueryState('threadId');
   const id = threadId ? threadId : _threadId;
   const trpc = useTRPC();
+  const queryClient = useQueryClient();
   const { data: settings } = useSettings();
   const { theme: systemTheme } = useTheme();
   // Pass the current folder through so the server searches the right
@@ -80,11 +81,40 @@ export const useThread = (threadId: string | null, options?: { enabled?: boolean
   // Trash, Archive, or Spam.
   const { folder } = useParams<{ folder: string }>();
 
+  // UID hint — walk every cached `mail.listThreads` page (any folder /
+  // search filter / label combo) looking for the row whose id matches.
+  // When found, hand the UID + UIDVALIDITY back to the server so it can
+  // resolve via a single FETCH instead of the O(N) SEARCH HEADER scan.
+  // Cache misses (direct URL navigation, post-restart) just take the
+  // slow path — never a correctness issue, only latency.
+  const uidHint = useMemo(() => {
+    if (!id) return undefined;
+    type CachedListPage = {
+      threads?: Array<{ id?: string; uid?: number; uidValidity?: number }>;
+    };
+    type CachedListData = { pages?: CachedListPage[] } | undefined;
+    const queries = queryClient.getQueriesData<CachedListData>({
+      queryKey: [['mail', 'listThreads']],
+    });
+    for (const [, data] of queries) {
+      const pages = data?.pages;
+      if (!pages) continue;
+      for (const page of pages) {
+        const row = page.threads?.find((t) => t.id === id);
+        if (row && typeof row.uid === 'number' && typeof row.uidValidity === 'number') {
+          return { uid: row.uid, uidValidity: row.uidValidity };
+        }
+      }
+    }
+    return undefined;
+  }, [id, queryClient]);
+
   const threadQuery = useQuery(
     trpc.mail.get.queryOptions(
       {
         id: id!,
         folder,
+        uidHint,
       },
       {
         enabled: (options?.enabled ?? true) && !!id && !!session?.user.id,

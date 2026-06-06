@@ -1,28 +1,15 @@
 /**
- * Shared compose domain/subdomain helpers.
+ * Compose domain helpers — currently only port helpers, which live in
+ * lib/deployable-service.ts so lib/ can use them without reaching into
+ * modules/. Re-exported here for the compose modules that already
+ * imported them at this path.
  *
- * Used by both the compose pipeline (route registration after deploy)
- * and the preflight checks (domain validation before build).
+ * Older subdomain helpers (`normalizeSubdomain`, `defaultServiceSubdomain`)
+ * were removed — neither had any callers and resolveServiceHostnameLabel
+ * from @repo/core covers the same job inline at the use sites.
  */
 
-import { defaultServiceHostnameLabel, normalizeServiceLabel } from "@repo/core";
-
-/** Normalize a string into a valid DNS subdomain label. */
-export function normalizeSubdomain(value: string): string {
-  return normalizeServiceLabel(value);
-}
-
-/** Default subdomain for a compose service: `<project>` for web/app/frontend, `<project>-<service>` otherwise. */
-export function defaultServiceSubdomain(projectSlug: string, serviceName: string): string {
-  return defaultServiceHostnameLabel(projectSlug, serviceName);
-}
-
-/** Parse the last port number from a port spec string (e.g. "8080:3000/tcp" → 3000). */
-export function parseServicePort(value?: string): number | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const last = trimmed.split(":").pop()?.split("/")[0]?.trim();
-  const port = Number(last);
-  return Number.isFinite(port) && port > 0 ? port : null;
-}
+// Port helpers moved to lib/deployable-service.ts so lib/routing-domains.ts
+// can use them without reaching into modules/. Re-exported here for the
+// compose modules that already imported them at this path.
+export { parseServicePort, resolveServicePort } from "../../../lib/deployable-service";

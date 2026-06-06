@@ -26,3 +26,9 @@ settingsRoutes.patch("/build-mode", ctrl.updateBuildMode);
 
 /** PATCH /deploy-defaults — set/clear the default deploy target + server */
 settingsRoutes.patch("/deploy-defaults", ctrl.updateDeployDefaults);
+
+/** PATCH /clone-credentials — set/clear the user-global git clone token */
+settingsRoutes.patch("/clone-credentials", ctrl.updateCloneCredentials);
+
+/** PATCH /clone-strategy-preference — save the first-time deploy nudge choice */
+settingsRoutes.patch("/clone-strategy-preference", ctrl.updateCloneStrategyPreference);

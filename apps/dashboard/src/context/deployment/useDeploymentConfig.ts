@@ -8,7 +8,7 @@ import { ApiError, getApiErrorMessage } from "@/lib/api/client";
 import { settingsApi } from "@/lib/api/settings";
 import type { BuildMode } from "@/lib/api/settings";
 import { STACKS, type StackDefinition } from "@repo/core";
-import type { BuildStrategy, DeploymentConfig, DeploymentModeSnapshot, MonorepoAppConfig, MonorepoWorkspaceConfig } from "./types";
+import type { BuildStrategy, DeploymentConfig, DeploymentModeSnapshot, MonorepoAppConfig, MonorepoWorkspaceConfig, PublicEndpoint } from "./types";
 import {
   DEFAULT_CONFIG,
   createPublicEndpoint,
@@ -208,7 +208,7 @@ function resolvePreparedRoutingState(
   response: PrepareProjectResponse,
   project: PersistedProject,
   repoName: string,
-  context: Pick<PreparedProjectContext, "projectType" | "preparedOptions">,
+  context: Pick<PreparedProjectContext, "projectType" | "preparedOptions" | "monorepoApps">,
 ): PreparedRoutingState {
   const effectiveHasServer = context.projectType === "services"
     ? context.preparedOptions.hasServer
@@ -218,6 +218,38 @@ function resolvePreparedRoutingState(
     ? context.preparedOptions.productionPort
     : String(project?.port ?? response.port ?? "");
   const hasStoredPort = context.projectType === "services" ? false : hasSavedProjectPort(project);
+
+  // Monorepo: seed one PublicEndpoint per detected sub-app so the
+  // existing `<PublicEndpointsCard>` in the sidebar renders all of them
+  // as separate Domain cards (the card's `+` button already supports
+  // multiple endpoints — we just need to seed the array). Each entry
+  // uses `{appName}-{projectSlug}` as the free-subdomain label and the
+  // sub-app's port; user can flip to a custom domain per entry the same
+  // way the single-app flow already supports.
+  if (context.projectType === "monorepo" && context.monorepoApps?.length) {
+    const slugify = (v: string) =>
+      v.toLowerCase().replace(/^@/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    const stored: PublicEndpoint[] = mapStoredPublicEndpoints(project) ?? [];
+    const seeded = context.monorepoApps.map((app) => {
+      const label = `${slugify(app.name)}-${slugify(primaryDomain)}`;
+      // Inherit if the user already saved a per-app endpoint for this
+      // sub-app (matched by domain label). Otherwise auto-derive.
+      const prior = stored.find((s: PublicEndpoint) => s.domain === label);
+      return createPublicEndpoint({
+        ...(prior ?? {}),
+        port: app.port || "",
+        targetPath: app.hasServer ? "" : "/",
+        domain: label,
+        domainType: "free",
+      });
+    });
+    return {
+      effectiveHasServer,
+      primaryPort,
+      hasStoredPort,
+      publicEndpoints: seeded,
+    };
+  }
 
   return {
     effectiveHasServer,

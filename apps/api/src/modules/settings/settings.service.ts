@@ -26,6 +26,31 @@ export async function getBuildMode(userId: string): Promise<BuildMode> {
 }
 
 /**
+ * Has the user explicitly opted out of the gh-CLI fallback?
+ * Used by github.auth.getUserStatus to honor a disconnect from cli mode.
+ */
+export async function isGithubCliDisabled(userId: string): Promise<boolean> {
+  const settings = await repos.settings.findByUser(userId);
+  return settings?.githubCliDisabled ?? false;
+}
+
+/** Flip the gh-CLI suppression flag. Inserts a row if the user has none yet. */
+export async function setGithubCliDisabled(userId: string, disabled: boolean): Promise<void> {
+  const existing = await repos.settings.findByUser(userId);
+  if (existing) {
+    await repos.settings.update(userId, { githubCliDisabled: disabled });
+    return;
+  }
+  const { randomBytes } = await import("node:crypto");
+  await repos.settings.upsert({
+    id: "us_" + randomBytes(12).toString("base64url"),
+    userId,
+    buildMode: "auto",
+    githubCliDisabled: disabled,
+  });
+}
+
+/**
  * Resolve the user's default deploy target + server id.
  *
  * Returns nulls when the user has no preference yet. Callers in the dashboard

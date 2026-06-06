@@ -46,7 +46,10 @@ export default function DeployMailPage() {
   const [bootReady, setBootReady] = useState(false);
 
   const [domain, setDomain] = useState("");
-  const [targetServerId, setTargetServerId] = useState("");
+  // selectedKey is `${kind}:${serverId}` so we can distinguish "opshcloud"
+  // (serverId is "") from a self-hosted server even when the latter is empty
+  // for some reason — keys never collide across kinds.
+  const [selectedKey, setSelectedKey] = useState("");
   const [targets, setTargets] = useState<WebmailTargetOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
@@ -67,7 +70,7 @@ export default function DeployMailPage() {
       }
       setTargets(tg.options);
       const first = tg.options.find((o) => !o.disabled);
-      if (first) setTargetServerId(first.serverId);
+      if (first) setSelectedKey(`${first.kind}:${first.serverId}`);
       setBootReady(true);
     });
     return () => {
@@ -75,21 +78,43 @@ export default function DeployMailPage() {
     };
   }, [mailServerId]);
 
+  const selectedTarget = targets.find(
+    (t) => `${t.kind}:${t.serverId}` === selectedKey,
+  );
+
   const canSubmit = useMemo(() => {
     if (!domain || !/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(domain))
       return false;
-    if (!targetServerId) return false;
+    if (!selectedTarget) return false;
+    if (selectedTarget.disabled) return false;
+    if (selectedTarget.kind !== "opshcloud" && !selectedTarget.serverId)
+      return false;
     return true;
-  }, [domain, targetServerId]);
+  }, [domain, selectedTarget]);
+
+  const mailHostnameFromStatus = status?.domain ? `mail.${status.domain}` : "";
+  // When cloud is chosen AND the chosen domain is the mail server's own
+  // `mail.<install>` subdomain, the deploy uses the proxy variant: the
+  // workload runs on Opshcloud at *.opsh.io, the mail VPS proxies the
+  // public hostname over. DNS stays put — operators don't have to touch
+  // it. Otherwise both paths follow normal preflight/DNS expectations.
+  const isCloudProxyVariant =
+    selectedTarget?.kind === "opshcloud" &&
+    !!mailHostnameFromStatus &&
+    domain.toLowerCase() === mailHostnameFromStatus;
 
   const startDeploy = async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || !selectedTarget) return;
     setSubmitting(true);
     try {
+      const target =
+        selectedTarget.kind === "opshcloud"
+          ? ({ kind: "cloud" } as const)
+          : ({ kind: "self", serverId: selectedTarget.serverId } as const);
       const { deploymentId } = await mailApi.webmail.deployAsProject({
         mailServerId,
-        targetServerId,
         hostname: domain.toLowerCase(),
+        target,
       });
       router.push(`/build/${deploymentId}`);
     } catch (err) {
@@ -121,8 +146,9 @@ export default function DeployMailPage() {
     );
   }
 
-  const selectedTarget = targets.find((t) => t.serverId === targetServerId);
-  const mailHostname = status?.domain ? `mail.${status.domain}` : "";
+  // `selectedTarget` is computed above (right after the `useEffect` that
+  // loads targets) — it drives both the proxy-variant detection and the
+  // submit-button disabled state, so it lives there rather than here.
   const domainPlaceholder = status?.domain
     ? `mail.${status.domain}`
     : "mail.example.com";
@@ -150,14 +176,14 @@ export default function DeployMailPage() {
         <div className="space-y-6">
           <Section
             title="Deploy to"
-            hint="Webmail can live on this mail server or on another openship-managed host."
+            hint="Webmail can live on this mail server, on another openship-managed host, or on Opshcloud."
           >
             {!bootReady ? (
               <div className="rounded-xl border border-border/50 bg-card px-4 py-6 text-sm text-muted-foreground flex items-center gap-2">
                 <Loader2 className="size-4 animate-spin" /> Loading targets…
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {targets.map((t) => {
                   const Icon =
                     t.kind === "mail"
@@ -165,13 +191,14 @@ export default function DeployMailPage() {
                       : t.kind === "server"
                         ? Server
                         : Globe;
+                  const key = `${t.kind}:${t.serverId}`;
                   return (
                     <OptionCard
                       key={`${t.kind}-${t.serverId || t.label}`}
-                      value={t.serverId || t.label}
-                      selected={targetServerId === t.serverId}
+                      value={key}
+                      selected={selectedKey === key}
                       onSelect={() => {
-                        if (!t.disabled) setTargetServerId(t.serverId);
+                        if (!t.disabled) setSelectedKey(key);
                       }}
                       icon={<Icon className="size-5" />}
                       label={t.label}
@@ -179,6 +206,7 @@ export default function DeployMailPage() {
                         t.description ||
                         (t.disabled ? t.disabledReason || "Not available" : "")
                       }
+                      className="h-full"
                     />
                   );
                 })}
@@ -188,7 +216,13 @@ export default function DeployMailPage() {
 
           <Section
             title="Domain"
-            hint="The URL operators will visit. DNS must point at the deploy target."
+            hint={
+              isCloudProxyVariant
+                ? "Your mail server already owns this hostname — we'll proxy it through your mail VPS to the Opshcloud workload. No DNS changes needed."
+                : selectedTarget?.kind === "opshcloud"
+                  ? "Point a CNAME at the *.opsh.io URL we provision (you'll see it after deploy)."
+                  : "The URL operators will visit. DNS must point at the deploy target."
+            }
           >
             <input
               value={domain}
@@ -209,7 +243,9 @@ export default function DeployMailPage() {
             </p>
             <SummaryRow label="Target" value={selectedTarget?.label ?? "—"} />
             <SummaryRow label="Domain" value={domain || "—"} />
-            {mailHostname && <SummaryRow label="Mail server" value={mailHostname} />}
+            {mailHostnameFromStatus && (
+              <SummaryRow label="Mail server" value={mailHostnameFromStatus} />
+            )}
           </div>
           <button
             type="button"

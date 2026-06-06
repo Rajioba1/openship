@@ -219,8 +219,11 @@ export async function onSuccess(
   // Webmail: flip mail-state `installed=true` so the /emails Open-webmail
   // CTA can finally surface. Slug is the only carrier of mailServerId
   // through the generic lifecycle — preserved by `ensureWebmailProject`.
+  // For cloud deploys we also pass `result.url` so the success hook can
+  // register an OpenResty proxy on the mail VPS pointing mail.<install>
+  // → opsh.io (when that's the chosen hostname).
   if (project.framework === "webmail") {
     const mailServerId = mailServerIdFromWebmailSlug(project.slug);
-    if (mailServerId) void markWebmailInstalled(mailServerId);
+    if (mailServerId) void markWebmailInstalled(mailServerId, result.url);
   }
 }

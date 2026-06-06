@@ -25,10 +25,10 @@ interface AddServerModalProps {
   onCreated: (server: ServerInfo) => void;
 }
 
-// Slim variant of /servers/new — credentials only, no capability picker
-// (deploy flow always wants runsApps=true) and no component-install step
-// (user can finish that on the server detail page after picking it). On save
-// we hand the saved ServerInfo back so the picker can select it immediately.
+// Slim variant of /servers/new — credentials only, no component-install
+// step (user can finish that on the server detail page after picking it).
+// On save we hand the saved ServerInfo back so the picker can select it
+// immediately.
 export function AddServerModal({ onCancel, onCreated }: AddServerModalProps) {
   const { showToast } = useToast();
 
@@ -110,8 +110,6 @@ export function AddServerModal({ onCancel, onCreated }: AddServerModalProps) {
     try {
       const data: Record<string, unknown> = {
         name: serverName.trim() || null,
-        runsApps: true,
-        runsMail: false,
         sshHost: sshHost.trim(),
         sshPort: parseInt(sshPort, 10) || 22,
         sshUser: sshUser.trim() || "root",

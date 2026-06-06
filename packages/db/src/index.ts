@@ -16,6 +16,7 @@ export {
   createDeploymentRepo,
   createDomainRepo,
   createServiceRepo,
+  normalizeRoutingFields,
   createSettingsRepo,
   createServerRepo,
   createAnalyticsRepo,

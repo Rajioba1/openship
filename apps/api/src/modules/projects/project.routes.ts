@@ -48,6 +48,10 @@ projectRoutes.put("/:id/env", ctrl.setEnvVars);
 projectRoutes.get("/:id/env/get", ctrl.envGet);
 projectRoutes.post("/:id/env/set", ctrl.envSet);
 
+/* ─── Per-project clone token (git credential override) ────────────────── */
+projectRoutes.get("/:id/clone-token", ctrl.getCloneToken);
+projectRoutes.patch("/:id/clone-token", ctrl.updateCloneToken);
+
 /* ─── Git ──────────────────────────────────────────────────────────────── */
 projectRoutes.get("/:id/git", ctrl.getGitInfo);
 projectRoutes.post("/:id/git/link", ctrl.linkRepo);

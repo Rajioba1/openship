@@ -12,8 +12,17 @@ export type NewServiceDeployment = typeof serviceDeployment.$inferInsert;
 
 // ─── Routing normalization ───────────────────────────────────────────────────
 
-function normalizeRoutingFields(input: {
-  exposed?: boolean;
+/**
+ * Single normalization rule for the service-row routing columns
+ * (`exposed`, `exposedPort`, `domain`, `customDomain`, `domainType`).
+ *
+ * Exported so the API layer (service.service.ts) can apply the SAME
+ * normalization on patch input before persisting. Two divergent
+ * implementations were drifting (one trimmed differently than the
+ * other) — collapsing to a single source of truth here.
+ */
+export function normalizeRoutingFields(input: {
+  exposed?: boolean | null;
   exposedPort?: string | null;
   domain?: string | null;
   customDomain?: string | null;
@@ -87,6 +96,18 @@ export function createServiceRepo(db: Database) {
 
     async remove(id: string) {
       await db.delete(service).where(eq(service.id, id));
+    },
+
+    /**
+     * Hard-delete every service row under a project. The FK on
+     * `serviceDeployment.serviceId` cascades, so this also removes the
+     * per-deployment service rows. Used by the project cleanup pipeline
+     * after a soft-delete — without this, service rows would survive as
+     * orphans (project soft-delete is logical only and never triggers the
+     * FK cascade that would remove them automatically).
+     */
+    async deleteByProjectId(projectId: string) {
+      await db.delete(service).where(eq(service.projectId, projectId));
     },
 
     /** List only the rows of one kind under a project. */
@@ -191,11 +212,30 @@ export function createServiceRepo(db: Database) {
       return results;
     },
 
-    /** Sync services from a parsed compose file. Creates new, updates existing, removes stale. */
+    /**
+     * Sync services from a parsed compose file.
+     *
+     * SCOPED TO kind="compose" ONLY. Monorepo sub-app rows have their own
+     * sync path (the monorepoApps ensure() flow) and must NOT be touched
+     * here — historically this helper called `listByProject(projectId)`
+     * + `remove(ex.id)` for every row not in the incoming compose list,
+     * which silently DELETED every monorepo sub-app on every compose-mode
+     * build of a mixed project. It also stomped per-row fields if a
+     * monorepo row happened to share a name with a compose service.
+     *
+     * Also preserves the user's explicit `enabled` choice on updates —
+     * compose's YAML doesn't carry an enabled flag, so re-syncing a row
+     * the user disabled in the dashboard must keep it disabled.
+     */
     async syncFromCompose(
       projectId: string,
       parsed: {
         name: string;
+        /** Discriminator — strictly "compose" entries are honored. Monorepo
+         *  rows passed in here are dropped: no DB unique constraint on
+         *  (projectId, name) means a monorepo row pretending to be compose
+         *  would create a duplicate ghost row alongside the real one. */
+        kind?: string | null;
         image?: string;
         build?: string;
         dockerfile?: string;
@@ -212,14 +252,21 @@ export function createServiceRepo(db: Database) {
         domainType?: string;
       }[],
     ) {
-      const existing = await this.listByProject(projectId);
-      const existingByName = new Map(existing.map((s) => [s.name, s]));
-      const incomingNames = new Set(parsed.map((s) => s.name));
+      // Defensive filter — even though every caller should already strip
+      // non-compose entries before reaching here, an explicit kind="monorepo"
+      // would otherwise insert a ghost compose row with the same name as the
+      // real monorepo sub-app. Belt-and-suspenders.
+      const composeParsed = parsed.filter((p) => !p.kind || p.kind === "compose");
+
+      const all = await this.listByProject(projectId);
+      const composeExisting = all.filter((s) => s.kind === "compose" || s.kind === null);
+      const existingByName = new Map(composeExisting.map((s) => [s.name, s]));
+      const incomingNames = new Set(composeParsed.map((s) => s.name));
 
       // Create or update
       const results: Service[] = [];
-      for (let i = 0; i < parsed.length; i++) {
-        const p = parsed[i];
+      for (let i = 0; i < composeParsed.length; i++) {
+        const p = composeParsed[i];
         const ex = existingByName.get(p.name);
 
         const routing = normalizeRoutingFields({
@@ -231,7 +278,10 @@ export function createServiceRepo(db: Database) {
         });
 
         if (ex) {
-          // Update existing
+          // Update existing — preserve the operator's `enabled` choice. The
+          // compose YAML doesn't carry an enabled flag; forcing true on
+          // every sync would un-disable services the user explicitly
+          // disabled in the dashboard.
           await this.update(ex.id, {
             image: p.image ?? null,
             build: p.build ?? null,
@@ -243,22 +293,22 @@ export function createServiceRepo(db: Database) {
             command: p.command ?? null,
             restart: p.restart ?? "unless-stopped",
             ...routing,
-            enabled: true,
+            // enabled left as-is (already on ex)
             sortOrder: i,
           });
           results.push({
             ...ex,
             ...p,
             ...routing,
-            enabled: true,
             sortOrder: i,
             updatedAt: new Date(),
           } as Service);
         } else {
-          // Create new
+          // Create new — new compose services default to enabled.
           const svc = await this.create({
             projectId,
             name: p.name,
+            kind: "compose",
             image: p.image ?? null,
             build: p.build ?? null,
             dockerfile: p.dockerfile ?? null,
@@ -276,8 +326,10 @@ export function createServiceRepo(db: Database) {
         }
       }
 
-      // Remove stale services (not in the incoming compose)
-      for (const ex of existing) {
+      // Remove stale compose services (not in the incoming compose YAML).
+      // Monorepo sub-apps live in a different kind and were filtered out
+      // above; they survive untouched.
+      for (const ex of composeExisting) {
         if (!incomingNames.has(ex.name)) {
           await this.remove(ex.id);
         }

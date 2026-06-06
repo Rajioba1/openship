@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, Database, HardDrive, Loader2 } from "lucide-react";
 import { projectsApi } from "@/lib/api";
+import { Checkbox } from "@/components/ui/Checkbox";
 
 interface Props {
   isOpen: boolean;
@@ -117,11 +118,12 @@ export const DeletionModal = ({
 
           {/* App vs single environment */}
           <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/50 bg-muted/15 p-3">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={deleteApp}
-              onChange={(e) => setDeleteApp(e.target.checked)}
-              className="mt-0.5 size-4 rounded border-border accent-red-600"
+              onCheckedChange={setDeleteApp}
+              tone="destructive"
+              className="mt-0.5"
+              aria-label="Delete all environments"
             />
             <span className="min-w-0">
               <span className="block text-sm font-medium text-foreground">Delete all environments</span>
@@ -142,11 +144,12 @@ export const DeletionModal = ({
           ) : showWipeBlock ? (
             <div className="rounded-xl border border-border/50 overflow-hidden">
               <label className="flex cursor-pointer items-start gap-3 bg-muted/15 px-3 py-3">
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={wipeVolumes}
-                  onChange={(e) => setWipeVolumes(e.target.checked)}
-                  className="mt-0.5 size-4 rounded border-border accent-red-600"
+                  onCheckedChange={setWipeVolumes}
+                  tone="destructive"
+                  className="mt-0.5"
+                  aria-label="Also wipe service data"
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2">

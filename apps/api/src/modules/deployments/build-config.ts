@@ -81,3 +81,37 @@ export function createDockerfileBuildConfig(
     },
   });
 }
+
+/**
+ * Build config for a monorepo sub-app built from source (no Dockerfile in the
+ * repo). The runtime's generated-Dockerfile branch fires when:
+ *   1. stack !== "docker"   (we pass the sub-app's framework instead)
+ *   2. No Dockerfile exists at the resolved root directory
+ *
+ * Under those conditions the runtime synthesizes a Dockerfile from
+ * installCommand + buildCommand + startCommand + outputDirectory +
+ * productionPaths, identical to how the single-app source pipeline builds.
+ *
+ * Unlike `createDockerfileBuildConfig`, this factory PRESERVES install/build/
+ * start/output fields from `overrides` (or the snapshot) — those are exactly
+ * what the runtime consumes to generate the Dockerfile.
+ */
+export function createMonorepoSourceBuildConfig(
+  opts: BuildConfigFactoryOptions,
+): BuildConfig {
+  return createBuildConfig({
+    ...opts,
+    overrides: {
+      buildStrategy: "server",
+      hasServer: true,
+      ...opts.overrides,
+      // EXPLICIT undefined. The runtime's generated-Dockerfile branch fires
+      // only when dockerfilePath is null/undefined AND the resolved root
+      // has no Dockerfile file. If a caller ever spreads in an override
+      // block that accidentally sets dockerfilePath, the synthesized-
+      // Dockerfile path would silently disappear and we'd fall to "no
+      // Dockerfile found" errors. Pinning it last guarantees the contract.
+      dockerfilePath: undefined,
+    },
+  });
+}

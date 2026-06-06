@@ -1,6 +1,6 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FrameworkId, EnvironmentVariable } from "@/components/import-project/types";
-import type { PrepareSingleAppCandidate } from "@/lib/api/deploy";
+import type { PrepareComposeService, PrepareSingleAppCandidate } from "@/lib/api/deploy";
 import { getBuildImage, STACKS, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId } from "@repo/core";
 import type { BuildLog } from "@/utils/deploymentPhaseDetector";
 
@@ -57,34 +57,14 @@ export interface Screenshot {
 
 // ─── Compose service (matches API response) ─────────────────────────────────
 
-export interface ComposeServiceInfo {
-  name: string;
-  image?: string;
-  build?: string;
-  dockerfile?: string;
-  ports: string[];
-  dependsOn: string[];
-  environment: Record<string, string>;
-  environmentMeta?: Record<
-    string,
-    {
-      source: "env-file" | "default" | "missing" | "interpolated";
-      variable?: string;
-      defaultValue?: string;
-      resolvedValue: string;
-      expression?: string;
-    }
-  >;
-  volumes: string[];
-  command?: string;
-  restart?: string;
-  // Per-service exposure settings (set by user in UI)
-  exposed?: boolean;
-  exposedPort?: string;
-  domain?: string;
-  customDomain?: string;
-  domainType?: "free" | "custom";
-}
+/**
+ * Compose-service shape as it travels through the dashboard's deployment
+ * context. Aliased to PrepareComposeService (the API client's matching
+ * type) so the two stay synchronized — same wire shape, one place to
+ * change it. The dashboard's deployment context uses this name for
+ * legacy reasons; new code should reach for PrepareComposeService.
+ */
+export type ComposeServiceInfo = PrepareComposeService;
 
 export interface PublicEndpoint {
   id: string;

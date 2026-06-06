@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   chmod,
   mkdtemp,
@@ -7,6 +7,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { TRANSFER_EXCLUDES } from "@repo/core";
 import { getTarCreateArgs, getTarCreateEnv } from "../archive";
@@ -20,6 +21,69 @@ import {
 } from "./local-shell";
 import { reconcileKnownHosts } from "./ssh-support";
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * Total bytes under `path` — header decoration only, NOT load-bearing.
+ *
+ * Uses bare `du -sk` (portable across GNU + BSD); the GNU `--exclude=` flag
+ * isn't supported on macOS so we skip excludes here. That means the
+ * estimate over-reports when the source dir has excluded children
+ * (node_modules etc.), but the byte-flowing heartbeat below is what
+ * actually shows progress — this number is just a "you're about to ship
+ * roughly X" preface.
+ */
+/**
+ * Detect whether the local `rsync` binary is rsync 3.0 or newer.
+ *
+ * macOS ships rsync 2.6.9 (released 2006). The 3.0 line (2008) added
+ * `--skip-compress`, faster algorithms, and a different protocol. Devs
+ * who haven't `brew install rsync` are running the 2.6.9 vintage and
+ * crash on the newer flags.
+ *
+ * Cached once per process — `rsync --version` is cheap but the result
+ * is stable for the lifetime of the API server. Returns false on any
+ * detection failure (timeout, parse error, missing binary) — safer to
+ * use the 2.x-compatible flag set than to risk a deploy-breaking error.
+ */
+let _modernRsyncCache: Promise<boolean> | null = null;
+async function isModernRsync(): Promise<boolean> {
+  if (_modernRsyncCache) return _modernRsyncCache;
+  _modernRsyncCache = (async () => {
+    try {
+      const { stdout } = await execFileAsync("rsync", ["--version"], {
+        timeout: 5_000,
+      });
+      // Line shape: "rsync  version 3.2.7  protocol version 31"
+      // We just need the leading "version X.Y" token.
+      const match = stdout.match(/version\s+(\d+)\.(\d+)/i);
+      if (!match) return false;
+      const major = Number.parseInt(match[1], 10);
+      return Number.isFinite(major) && major >= 3;
+    } catch {
+      return false;
+    }
+  })();
+  return _modernRsyncCache;
+}
+
+async function estimateLocalSize(path: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync("du", ["-sk", path]);
+    const kb = Number.parseInt(stdout.trim().split(/\s+/)[0] ?? "", 10);
+    return Number.isFinite(kb) ? kb * 1024 : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 type TransferOptions = { excludes?: string[]; includes?: string[] };
 type LogCallback = (log: LogEntry) => void;
 
@@ -31,6 +95,7 @@ export interface RemoteTransferDeps {
     localCmd: string,
     remoteCmd: string,
     onLog?: LogCallback,
+    onBytes?: (bytes: number) => void,
   ): Promise<{ code: number }>;
 }
 
@@ -77,15 +142,42 @@ export async function transferRemoteDirectoryWithRsync(
   await reconcileKnownHosts(deps.config);
   await deps.ensureRemoteDir(remotePath);
 
+  // macOS ships rsync 2.6.9 (from 2006) and rejects rsync-3.0+ flags
+  // like `--skip-compress`. We detect once per process whether the
+  // local rsync is "modern enough" and only add the flag when safe.
+  const modernRsync = await isModernRsync();
   await withTemporaryPrivateKey(deps.config, async (keyPath) => {
     const args = [
       "-az",
       "--partial",
       "--progress",
       "--stats",
-      "-e",
-      buildRsyncSshCommand(deps.config, keyPath),
+      // --whole-file skips rsync's per-block delta algorithm and sends
+      // each file as one stream. Our target dirs are always fresh —
+      // the deploy pipeline `rm -rf`'s them before transfer — so the
+      // delta scan has nothing to compare against and is pure overhead
+      // (each file pays a checksum/metadata roundtrip for zero gain).
+      // 20–40% faster on first-time transfers of build artifacts.
+      // Supported in rsync since 2.4, safe on every install.
+      "--whole-file",
     ];
+    if (modernRsync) {
+      // --skip-compress tells rsync NOT to gzip already-compressed
+      // binary formats. Without this, `-z` wastes CPU gzipping
+      // PNG/JPG/etc which are already entropy-maxed — that CPU stall
+      // throttles the wire (the big PNG dips at ~150 KB/s mid-file).
+      // Text-like assets (JS/CSS/HTML/JSON/SVG) still get -z and see
+      // real ~3-5× wire savings.
+      args.push(
+        "--skip-compress=" +
+          "png/jpg/jpeg/gif/webp/avif/bmp/ico/" +
+          "woff/woff2/ttf/otf/eot/" +
+          "mp4/webm/mov/mp3/m4a/ogg/oga/ogv/" +
+          "zip/gz/tgz/bz2/xz/7z/rar/" +
+          "wasm/pdf",
+      );
+    }
+    args.push("-e", buildRsyncSshCommand(deps.config, keyPath));
 
     const target = formatRsyncTarget(deps.config, remotePath);
 
@@ -120,20 +212,86 @@ export async function transferRemoteDirectoryWithTar(
   onLog?: LogCallback,
   options?: TransferOptions,
 ): Promise<void> {
+  const excludes = options?.excludes ?? [...TRANSFER_EXCLUDES];
   const tarArgs = getTarCreateArgs(localPath, {
-    excludes: options?.excludes ?? [...TRANSFER_EXCLUDES],
+    excludes,
     includes: options?.includes,
   });
-  const tarCmd = `tar ${tarArgs.map(sq).join(" ")}`;
 
-  const { code } = await deps.pipeLocal(
-    tarCmd,
-    `mkdir -p ${sq(remotePath)} && tar xzf - -C ${sq(remotePath)}`,
-    onLog,
-  );
-  if (code !== 0) {
-    throw new Error("Failed to transfer files to remote server");
+  // Best-effort upfront size — gives a "Streaming 142 MB…" header and a
+  // denominator for the percentage. NOT required for progress to fire —
+  // the byte counter below works without it. Null is acceptable; we
+  // degrade to wire-bytes-only.
+  const totalBytes = await estimateLocalSize(localPath);
+
+  if (totalBytes !== null && totalBytes > 0) {
+    onLog?.(logEntry(`Streaming ~${formatBytes(totalBytes)} of source as tar over the existing SSH connection...`));
+  } else {
+    onLog?.(logEntry("Streaming source as tar over the existing SSH connection..."));
   }
+
+  const tarCmd = `tar ${tarArgs.map(sq).join(" ")}`;
+  const startedAt = Date.now();
+
+  // Heartbeat — count bytes flowing through the pipe, print every 3s.
+  // Compressed wire bytes, not source bytes — so when totalBytes (source)
+  // is set, the displayed percentage is "wire vs source" and tends to be
+  // a slight under-read (tar -z compresses ~30-60% for typical builds).
+  // Still useful: shows the transfer is alive AND advancing.
+  let bytesSent = 0;
+  let lastReportedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    const now = Date.now();
+    const elapsed = (now - startedAt) / 1000;
+    const sinceLast = (now - lastReportedAt) / 1000;
+    if (sinceLast < 2.5) return;
+    lastReportedAt = now;
+    const mbps = elapsed > 0 ? bytesSent / 1024 / 1024 / elapsed : 0;
+    if (totalBytes && totalBytes > 0) {
+      // Heuristic ceiling — wire bytes can plausibly reach ~total when
+      // the data is incompressible; cap the displayed percent so we
+      // don't show "120%" on text-heavy trees that compressed below 50%.
+      const ratio = Math.min(bytesSent / totalBytes, 1);
+      const pct = Math.floor(ratio * 100);
+      onLog?.(
+        logEntry(
+          `  ~${pct}% · ${formatBytes(bytesSent)} sent · ${mbps.toFixed(1)} MB/s · ${elapsed.toFixed(0)}s elapsed`,
+        ),
+      );
+    } else {
+      onLog?.(
+        logEntry(
+          `  ${formatBytes(bytesSent)} sent · ${mbps.toFixed(1)} MB/s · ${elapsed.toFixed(0)}s elapsed`,
+        ),
+      );
+    }
+  }, 3_000);
+  // Don't let the heartbeat keep the process alive on test/CLI shutdowns.
+  heartbeat.unref();
+
+  try {
+    const { code } = await deps.pipeLocal(
+      tarCmd,
+      `mkdir -p ${sq(remotePath)} && tar xzf - -C ${sq(remotePath)}`,
+      onLog,
+      (bytes) => {
+        bytesSent += bytes;
+      },
+    );
+    if (code !== 0) {
+      throw new Error("Failed to transfer files to remote server");
+    }
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  const elapsed = Math.max(1, Date.now() - startedAt);
+  const mbps = bytesSent / 1024 / 1024 / (elapsed / 1000);
+  onLog?.(
+    logEntry(
+      `Transferred ${formatBytes(bytesSent)} (wire) in ${(elapsed / 1000).toFixed(1)}s · ${mbps.toFixed(1)} MB/s`,
+    ),
+  );
 }
 
 function formatRsyncTarget(config: SshConfig, remotePath: string): string {

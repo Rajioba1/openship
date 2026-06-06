@@ -44,12 +44,28 @@ function rateLimited(c: any, retryAfter: number) {
   return c.json({ error: 'Too many requests' }, 429);
 }
 
+/**
+ * Session cookies are HOST-ONLY (no Domain attribute) on purpose.
+ *
+ * RFC 6265 §5.3: a same-named cookie pinned to a different Domain is a
+ * SEPARATE jar entry, not a replacement. Earlier builds set a Domain
+ * attribute (or set the cookie host-only when COOKIE_DOMAIN was
+ * undefined), and any browser that visited then still holds a shadow
+ * cookie at the wider scope. Hono's cookie parser returns the FIRST
+ * match and breaks — so the stale shadow wins, the server can't find
+ * its row, and the user gets bounced to /login on every navigation
+ * until they manually clear the jar. Pinning to host-only here makes
+ * "the cookie I just wrote" the only cookie the browser ships back.
+ *
+ * `evictShadowCookies` below handles users who already have a wide-
+ * scope shadow from a previous build — every sign-in evicts the known
+ * historical scopes so they don't outlive the next successful login.
+ */
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: env.NODE_ENV === 'production',
   sameSite: 'Lax' as const,
   path: '/',
-  domain: env.COOKIE_DOMAIN === 'localhost' ? undefined : env.COOKIE_DOMAIN,
 };
 
 // Non-httpOnly companion of the active session cookie. The client reads
@@ -62,7 +78,40 @@ const PUBLIC_COOKIE_OPTS = { ...COOKIE_OPTS, httpOnly: false };
 
 const LIST_COOKIE_NAME = `${env.SESSION_COOKIE_NAME}s`;
 
+/**
+ * Evict any same-name session cookies pinned to wider scopes by previous
+ * builds (Domain=<host>, Domain=<apex>, Domain=.<apex>) so they don't
+ * shadow the fresh host-only cookie we're about to write. Each scope
+ * needs its own `Set-Cookie: name=; Max-Age=0` because browsers only
+ * remove a cookie when the (name, Domain, Path) triple matches.
+ *
+ * Cheap (a few extra Set-Cookie headers) and idempotent — safe to call
+ * on every login. Users who never had a wide-scope cookie just receive
+ * a couple of no-op deletes; users who did get their loop unstuck.
+ */
+function evictShadowCookies(c: any) {
+  const configured = env.COOKIE_DOMAIN;
+  const scopes: Array<{ domain?: string }> = [];
+  if (configured && configured !== 'localhost') {
+    scopes.push({ domain: configured });
+    scopes.push({ domain: `.${configured}` });
+    if (configured.includes('.')) {
+      const apex = configured.split('.').slice(-2).join('.');
+      if (apex !== configured) {
+        scopes.push({ domain: apex });
+        scopes.push({ domain: `.${apex}` });
+      }
+    }
+  }
+  for (const scope of scopes) {
+    for (const name of [env.SESSION_COOKIE_NAME, ACTIVE_ID_COOKIE_NAME, LIST_COOKIE_NAME]) {
+      deleteCookie(c, name, { path: '/', ...scope });
+    }
+  }
+}
+
 function setActiveCookies(c: any, sessionId: string, expiresAt: Date) {
+  evictShadowCookies(c);
   setCookie(c, env.SESSION_COOKIE_NAME, sessionId, { ...COOKIE_OPTS, expires: expiresAt });
   setCookie(c, ACTIVE_ID_COOKIE_NAME, sessionId, {
     ...PUBLIC_COOKIE_OPTS,
@@ -71,6 +120,7 @@ function setActiveCookies(c: any, sessionId: string, expiresAt: Date) {
 }
 
 function clearActiveCookies(c: any) {
+  evictShadowCookies(c);
   deleteCookie(c, env.SESSION_COOKIE_NAME, COOKIE_OPTS);
   deleteCookie(c, ACTIVE_ID_COOKIE_NAME, PUBLIC_COOKIE_OPTS);
 }
@@ -279,7 +329,16 @@ authRoutes.get('/session', async (c) => {
   const sid = getCookie(c, env.SESSION_COOKIE_NAME);
   if (!sid) return c.json(null);
   const session = await getSession(sid);
-  if (!session) return c.json(null);
+  if (!session) {
+    // Cookie present but the row is gone (expired & swept, DB reset, prior
+    // deploy wiped state). Without an explicit delete the browser keeps
+    // resending the dead id on every request — and on multi-cookie shadow
+    // jars the dead id is the FIRST match, so the user loops to /login
+    // forever. Evict it here so the next request hits the !sid branch and
+    // /login can do a clean reauth.
+    clearActiveCookies(c);
+    return c.json(null);
+  }
   return c.json({
     email: session.email,
     name: session.name,

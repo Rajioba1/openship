@@ -265,25 +265,6 @@ export async function installComponent(c: Context) {
   const serverId = body.serverId as string | undefined;
   if (!serverId) return c.json({ error: "serverId is required" }, 400);
 
-  // Mail-only servers are owned by the mail-server install pipeline (which
-  // runs iRedMail.sh). Do NOT let the standard component installer touch
-  // them — Docker / certbot get installed via that pipeline instead, and
-  // any out-of-band install would conflict with iRedMail's own setup.
-  // Servers that run BOTH apps and mail accept component installs normally
-  // (Docker is needed for the app side).
-  const targetServer = await repos.server.get(serverId);
-  if (targetServer && !targetServer.runsApps) {
-    return c.json(
-      {
-        error: "mail_only_server",
-        message: `Server "${
-          targetServer.name ?? targetServer.sshHost
-        }" is a mail-only server. Component installation is handled by the mail-server provisioning pipeline. To enable component installs here, also turn on "Runs apps" for this server.`,
-      },
-      400,
-    );
-  }
-
   const componentName = body.component as string;
 
   if (!componentName || !ALLOWED_COMPONENTS.has(componentName)) {

@@ -2,12 +2,16 @@ import type { Context } from "hono";
 import { getUserId } from "../../lib/controller-helpers";
 import { repos } from "@repo/db";
 import { randomBytes } from "node:crypto";
+import { encrypt } from "../../lib/encryption";
 import {
   getBuildMode,
   getDeployDefaults,
   isValidDefaultDeployTarget,
   type BuildMode,
 } from "./settings.service";
+
+const VALID_CLONE_STRATEGY_PREFERENCES = ["prompt", "local", "remote-with-token"] as const;
+type CloneStrategyPreference = (typeof VALID_CLONE_STRATEGY_PREFERENCES)[number];
 
 const VALID_MODES: BuildMode[] = ["auto", "server", "local"];
 
@@ -18,11 +22,30 @@ function generateId() {
 /** GET / — return platform settings for the authenticated user */
 export async function get(c: Context) {
   const userId = getUserId(c);
-  const [buildMode, deployDefaults] = await Promise.all([
+  const [buildMode, deployDefaults, cloneCreds] = await Promise.all([
     getBuildMode(userId),
     getDeployDefaults(userId),
+    getCloneCredentialsState(userId),
   ]);
-  return c.json({ buildMode, ...deployDefaults });
+  return c.json({ buildMode, ...deployDefaults, ...cloneCreds });
+}
+
+/**
+ * Read-only view of the user's clone credentials state for the dashboard.
+ * Never returns the token itself — only `hasToken` + when it was set + the
+ * "use as default" flag + the saved strategy preference. The token only
+ * leaves the server during clone, never via API responses.
+ */
+async function getCloneCredentialsState(userId: string) {
+  const settings = await repos.settings.findByUser(userId).catch(() => null);
+  return {
+    cloneToken: {
+      hasToken: !!settings?.cloneTokenEncrypted,
+      setAt: settings?.cloneTokenSetAt?.toISOString() ?? null,
+      asDefault: settings?.cloneTokenAsDefault ?? false,
+    },
+    cloneStrategyPreference: (settings?.cloneStrategyPreference ?? "prompt") as CloneStrategyPreference,
+  };
 }
 
 /** PUT / — create or update platform settings */
@@ -125,4 +148,99 @@ export async function updateDeployDefaults(c: Context) {
   }
 
   return c.json({ defaultDeployTarget: target, defaultServerId: serverId });
+}
+
+/**
+ * PATCH /clone-credentials — set/replace/clear the user-global clone token.
+ *
+ * Body:
+ *   { token?: string | null, asDefault?: boolean }
+ *
+ *   token === null  → clear the stored token (also clears asDefault).
+ *   token: string   → encrypt and store. Empty string is treated as clear.
+ *   asDefault       → opt-in flag. If false, the stored token won't be used
+ *                     by `resolveCloneToken` (still useful as a one-off
+ *                     value the user can ship per-deploy via UI).
+ *
+ * Returns the read-only state (never the token itself).
+ */
+export async function updateCloneCredentials(c: Context) {
+  const userId = getUserId(c);
+  const body = await c.req.json().catch(() => ({}));
+
+  const rawToken = body?.token;
+  const clearing = rawToken === null || rawToken === "";
+  const setting = typeof rawToken === "string" && rawToken.length > 0;
+  if (!clearing && !setting && rawToken !== undefined) {
+    return c.json({ error: "token must be a string, null, or omitted" }, 400);
+  }
+
+  const asDefault = body?.asDefault === true;
+
+  const existing = await repos.settings.findByUser(userId);
+  const updates: Partial<{
+    cloneTokenEncrypted: string | null;
+    cloneTokenSetAt: Date | null;
+    cloneTokenAsDefault: boolean;
+  }> = {};
+
+  if (clearing) {
+    updates.cloneTokenEncrypted = null;
+    updates.cloneTokenSetAt = null;
+    updates.cloneTokenAsDefault = false;
+  } else if (setting) {
+    updates.cloneTokenEncrypted = encrypt(rawToken);
+    updates.cloneTokenSetAt = new Date();
+    updates.cloneTokenAsDefault = asDefault;
+  } else if (rawToken === undefined && body?.asDefault !== undefined) {
+    // Token-untouched, just flipping the asDefault flag.
+    updates.cloneTokenAsDefault = asDefault;
+  }
+
+  if (!existing) {
+    await repos.settings.upsert({
+      id: generateId(),
+      userId,
+      buildMode: "auto",
+      ...updates,
+    });
+  } else {
+    await repos.settings.update(userId, updates);
+  }
+
+  return c.json(await getCloneCredentialsState(userId));
+}
+
+/**
+ * PATCH /clone-strategy-preference — save the user's first-time-deploy choice.
+ *
+ * Body: { preference: "prompt" | "local" | "remote-with-token" }
+ *
+ * Once set to anything other than "prompt", the deploy nudge stops asking.
+ */
+export async function updateCloneStrategyPreference(c: Context) {
+  const userId = getUserId(c);
+  const body = await c.req.json().catch(() => ({}));
+  const pref = body?.preference;
+  if (!VALID_CLONE_STRATEGY_PREFERENCES.includes(pref)) {
+    return c.json(
+      {
+        error: `preference must be one of: ${VALID_CLONE_STRATEGY_PREFERENCES.join(", ")}`,
+      },
+      400,
+    );
+  }
+
+  const existing = await repos.settings.findByUser(userId);
+  if (!existing) {
+    await repos.settings.upsert({
+      id: generateId(),
+      userId,
+      buildMode: "auto",
+      cloneStrategyPreference: pref,
+    });
+  } else {
+    await repos.settings.update(userId, { cloneStrategyPreference: pref });
+  }
+  return c.json({ cloneStrategyPreference: pref });
 }

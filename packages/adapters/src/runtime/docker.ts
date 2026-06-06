@@ -44,8 +44,9 @@ import type {
   MultiServiceDeployConfig,
   MultiServiceDeployResult,
 } from "./types";
-import { BuildLogger, parseLogLevel } from "./build-pipeline";
+import { BuildLogger, parseLogLevel, sq } from "./build-pipeline";
 import { createDockerBuildContext } from "./docker-build-context";
+import { transferLocalDirectory } from "./transfer";
 import {
   type DockerConnectionOptions,
   type DockerTransport,
@@ -250,12 +251,50 @@ export class DockerRuntime implements RuntimeAdapter {
 
   // ── Build lifecycle ────────────────────────────────────────────────────
 
+  /**
+   * Sum the byte size of a directory tree. Best-effort — used only for a
+   * human-readable "X MB context streamed" log line. Returns 0 if the
+   * walk hits an error rather than failing the build.
+   */
+  private async estimateContextSize(dir: string): Promise<number> {
+    const { stat, readdir } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    let total = 0;
+    const stack: string[] = [dir];
+    while (stack.length) {
+      const current = stack.pop()!;
+      let entries;
+      try {
+        entries = await readdir(current, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const full = join(current, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(full);
+        } else if (entry.isFile()) {
+          try {
+            const s = await stat(full);
+            total += s.size;
+          } catch { /* ignore */ }
+        }
+      }
+    }
+    return total;
+  }
+
   private emitDockerStep(
     logger: BuildLogger,
     step: "clone" | "install" | "build",
     status: "running" | "completed" | "skipped",
     message: string,
   ): void {
+    // Mirror the step event to the terminal so users can follow the
+    // phases in the build log too — otherwise the terminal stays blank
+    // between text logs while the stepper bar quietly advances.
+    const label = status === "running" ? "→" : status === "completed" ? "✓" : "↷";
+    logger.log(`[${step}] ${label} ${message}`);
     logger.step(step, status, message);
   }
 
@@ -293,10 +332,12 @@ export class DockerRuntime implements RuntimeAdapter {
           line,
         );
 
-        // After the last step completes, Docker still needs to commit the
-        // layer and run the runtime stage (COPY, etc.). Log so users know.
-        if (status === "completed" && (step === "build" || step === "install")) {
-          logger.log("Packaging image...");
+        // After install completes inside the RUN, Docker still needs to
+        // commit layers, run the runtime stage (COPY, etc.), and tag the
+        // image. Tell the user we're past the slow part — the rest is
+        // fast and not progress-streamed.
+        if (status === "completed" && step === "install") {
+          logger.log("Finalizing image (layer commit + tag)...");
         }
 
         return null;
@@ -320,13 +361,22 @@ export class DockerRuntime implements RuntimeAdapter {
     return null;
   }
 
+  // Only the truly-redundant lines get filtered. We KEEP "Step N/M : ..."
+  // because that's the user's best progress signal during a long build —
+  // it shows which Dockerfile instruction is currently executing.
+  //
+  // Removed (= now passes through to terminal):
+  //   - "Step N/M : ..."  → high-signal, shows progress
+  //   - "Successfully built / tagged" → confirms success
+  //
+  // Still filtered (= noise):
+  //   - "---> hash"       → opaque layer hash, no signal for users
+  //   - "Running in ..."  → intermediate container id, no signal
+  //   - "Removing intermediate container ..." → cleanup chatter
   private static readonly DOCKER_BUILDER_NOISE: RegExp[] = [
-    /^Step \d+\/\d+\s*:/i,       // Step 3/12 : RUN ...
     /^--->/i,                     // ---> abc123def
     /^Running in\s+[a-f0-9]{6,}$/i,
     /^Removing intermediate container\s+[a-f0-9]{6,}$/i,
-    /^Successfully built\s+[a-f0-9]{6,}$/i,
-    /^Successfully tagged\s+/i,
   ];
 
   private isLowSignalDockerLine(line: string): boolean {
@@ -359,6 +409,219 @@ export class DockerRuntime implements RuntimeAdapter {
     return `Cannot reach Docker daemon: ${message}. ${this.transport.unreachableHint}`;
   }
 
+  /**
+   * SSH transport build path. Bypasses dockerode's HTTP-over-SSH upload
+   * (which is ~1-2 MB/s and silent) in favor of two well-trodden pieces:
+   *
+   *   1. `transferLocalDirectory(...)` — defaults to rsync over the
+   *      SYSTEM `ssh` binary (NOT the Node `ssh2` library), with native
+   *      `--progress` output streamed straight from rsync. ~10-30 MB/s
+   *      typical. Lands the context at `/tmp/openship-build-<sessionId>`
+   *      on remote. Falls back to tar through the ssh2 channel only if
+   *      rsync isn't installed on either side.
+   *
+   *   2. `executor.streamExec("docker build ...")` — runs native docker
+   *      CLI on the remote. Its raw stdout/stderr streams back unfiltered
+   *      so the user sees real "Step N/M : ...", layer hashes, install
+   *      output, etc. Same logs you'd see SSHing in and running it by hand.
+   *
+   * Container lifecycle (deploy, stop, logs, etc.) still uses dockerode —
+   * only the slow build upload moves to this path.
+   */
+  private async buildViaSshTarPipe(
+    config: BuildConfig,
+    buildContext: Awaited<ReturnType<typeof createDockerBuildContext>>,
+    tag: string,
+    log: BuildLogger,
+  ): Promise<void> {
+    const executor = this.connectionOptions?.executor;
+    if (!executor) throw new Error("SSH build path requires an executor on connectionOptions");
+
+    const remoteContextDir = `/tmp/openship-build-${config.sessionId}`;
+    log.log(`Streaming build context to ${remoteContextDir}...`);
+
+    try {
+      // Wipe stale dir from a previous failed deploy, if any. -rf is
+      // safe — the path is namespaced by sessionId and only ever holds
+      // the context we just transferred.
+      await executor.exec(`rm -rf ${sq(remoteContextDir)} && mkdir -p ${sq(remoteContextDir)}`);
+
+      // Ship the context. transferLocalDirectory's default "auto" mode
+      // tries rsync first (system ssh + native --progress), tar/ssh2
+      // fallback only if rsync is missing.
+      await transferLocalDirectory(
+        buildContext.contextDir,
+        { kind: "executor", executor, path: remoteContextDir },
+        log,
+      );
+
+      // Compose the docker build command. Quoting matters — buildargs
+      // and labels can contain `=` and spaces.
+      const buildArgs = Object.entries({
+        ...config.envVars,
+        NODE_ENV: "production",
+      })
+        .filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
+        .map(([k, v]) => `--build-arg ${sq(`${k}=${v}`)}`)
+        .join(" ");
+      const labelArgs = Object.entries(
+        this.labels({ projectId: config.projectId, sessionId: config.sessionId }),
+      )
+        .map(([k, v]) => `--label ${sq(`${k}=${v}`)}`)
+        .join(" ");
+      const dockerfileFlag =
+        buildContext.dockerfileName && buildContext.dockerfileName !== "Dockerfile"
+          ? ` -f ${sq(buildContext.dockerfileName)}`
+          : "";
+
+      // `cd` into the context dir FIRST so docker resolves `-f` and the
+      // context `.` from the same place. Without this prefix, BuildKit
+      // resolves `-f Dockerfile.openship` against the shell's cwd (the
+      // SSH user's home, typically /root), not the context — and we hit
+      // "no such file or directory: Dockerfile.openship" even though the
+      // file is right there in the context dir on disk.
+      //
+      // Using `cd && docker build .` keeps the context an absolute path
+      // for clarity in the log AND ensures the dockerfile lookup is
+      // relative to the right directory.
+      const buildCmd =
+        `cd ${sq(remoteContextDir)} && ` +
+        `docker build -t ${sq(tag)}${dockerfileFlag} ` +
+        `${labelArgs} ${buildArgs} --force-rm .`;
+
+      log.log(`Running on remote: ${buildCmd}`);
+      log.log("─── docker build output ───");
+
+      this.emitDockerStep(log, "install", "running", "Running install inside container (docker build)");
+
+      const { code } = await executor.streamExec(buildCmd, (entry) => {
+        // Pass docker's real output straight through. No filtering —
+        // the user wants to see what docker says, not our interpretation
+        // of it.
+        log.log(entry.message, parseLogLevel(entry.message));
+      });
+
+      log.log("─── end docker build output ───");
+
+      if (code !== 0) {
+        throw new Error(`docker build exited with code ${code}`);
+      }
+
+      this.emitDockerStep(log, "install", "completed", "Image build finished");
+    } finally {
+      // Always clean up the remote context — even on failure. Don't
+      // await — if cleanup fails we still want the build result.
+      executor
+        .exec(`rm -rf ${sq(remoteContextDir)}`)
+        .catch(() => { /* best effort */ });
+      await buildContext.cleanup();
+    }
+  }
+
+  /**
+   * Dockerode build path. Used for local socket and TCP transports, plus
+   * SSH transports that didn't get an executor wired in (shouldn't happen
+   * in normal operation but kept as a safety net).
+   *
+   * This path is slower for SSH (HTTP-over-SSH upload has no streaming),
+   * but it's correct for local/TCP where there's no separate SSH
+   * connection to piggyback on.
+   */
+  private async buildViaDockerode(
+    config: BuildConfig,
+    buildContext: Awaited<ReturnType<typeof createDockerBuildContext>>,
+    tag: string,
+    log: BuildLogger,
+  ): Promise<void> {
+    log.log(`Streaming build context to Docker daemon — image tag: ${tag}`);
+
+    let stream: NodeJS.ReadableStream;
+    try {
+      stream = await this.docker.buildImage(
+        { context: buildContext.contextDir, src: buildContext.contextEntries },
+        {
+          t: tag,
+          dockerfile: buildContext.dockerfileName,
+          labels: this.labels({ projectId: config.projectId, sessionId: config.sessionId }),
+          buildargs: {
+            ...config.envVars,
+            NODE_ENV: "production",
+          },
+          forcerm: true,
+        },
+      );
+    } finally {
+      await buildContext.cleanup();
+    }
+
+    log.log("Connected to Docker daemon. Build output follows:");
+    let fatalBuildError: string | null = null;
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let idleTimer: NodeJS.Timeout | null = null;
+      let keepaliveTimer: NodeJS.Timeout | null = null;
+      let idleMinutes = 0;
+
+      const clearTimers = () => {
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+        if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+        idleMinutes = 0;
+      };
+
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        (stream as any).destroy?.(error);
+        reject(error);
+      };
+
+      const succeed = () => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        resolve();
+      };
+
+      const resetIdleTimer = () => {
+        clearTimers();
+        keepaliveTimer = setInterval(() => {
+          idleMinutes += 1;
+          log.log(`Still building... (no output for ${idleMinutes}m)`);
+        }, 60_000);
+        if ((keepaliveTimer as any).unref) (keepaliveTimer as any).unref();
+
+        idleTimer = setTimeout(() => {
+          fail(new Error(
+            "Docker build produced no output for 15 minutes. This usually means the remote server cannot reach the package registry, has broken DNS, or the Docker daemon stalled during the build.",
+          ));
+        }, DOCKER_BUILD_IDLE_TIMEOUT_MS);
+        if ((idleTimer as any).unref) (idleTimer as any).unref();
+      };
+
+      resetIdleTimer();
+
+      this.docker.modem.followProgress(
+        stream,
+        (err: Error | null) => {
+          if (err) { fail(err); return; }
+          succeed();
+        },
+        (event) => {
+          resetIdleTimer();
+          fatalBuildError ??= this.handleBuildEvent(event, log);
+        },
+      );
+    });
+
+    log.log("Docker daemon finished streaming build output. Finalizing image...\n");
+
+    if (fatalBuildError) {
+      throw new Error(fatalBuildError);
+    }
+  }
+
   async build(config: BuildConfig, logger?: BuildLogger): Promise<BuildResult> {
     const log = logger ?? new BuildLogger();
     const startTime = Date.now();
@@ -381,7 +644,22 @@ export class DockerRuntime implements RuntimeAdapter {
       const buildContext = await createDockerBuildContext(config, {
         requireRepositoryDockerfile: config.stack === "docker",
       });
-      this.emitDockerStep(log, "clone", "completed", "Docker build context ready");
+
+      // Report the size of the context so users know what they're paying
+      // for over the SSH wire. Failure here is non-fatal — the build can
+      // still proceed if we couldn't `du`.
+      try {
+        const sizeBytes = await this.estimateContextSize(buildContext.contextDir);
+        const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
+        this.emitDockerStep(
+          log,
+          "clone",
+          "completed",
+          `Docker build context ready (${sizeMB} MB)`,
+        );
+      } catch {
+        this.emitDockerStep(log, "clone", "completed", "Docker build context ready");
+      }
 
       if (buildContext.rootDirectory) {
         log.log(`Using Docker build root: ${buildContext.rootDirectory}`);
@@ -409,106 +687,21 @@ export class DockerRuntime implements RuntimeAdapter {
         this.emitDockerStep(log, "build", "skipped", "No build command configured");
       }
 
-      log.log(`Building image ${tag}...`);
+      const sshExecutor =
+        this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
 
-      let stream: NodeJS.ReadableStream;
-      try {
-        stream = await this.docker.buildImage(
-          { context: buildContext.contextDir, src: buildContext.contextEntries },
-          {
-            t: tag,
-            dockerfile: buildContext.dockerfileName,
-            labels: this.labels({ projectId: config.projectId, sessionId: config.sessionId }),
-            buildargs: {
-              ...config.envVars,
-              NODE_ENV: "production",
-            },
-            forcerm: true,
-          },
-        );
-      } finally {
-        await buildContext.cleanup();
-      }
-
-      log.log("Connected to Docker daemon, streaming build output...");
-      let fatalBuildError: string | null = null;
-
-      // followProgress is dockerode's documented approach for build output
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        let idleTimer: NodeJS.Timeout | null = null;
-        let keepaliveTimer: NodeJS.Timeout | null = null;
-        let idleMinutes = 0;
-
-        const clearTimers = () => {
-          if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
-          if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
-          idleMinutes = 0;
-        };
-
-        const fail = (error: Error) => {
-          if (settled) return;
-          settled = true;
-          clearTimers();
-          (stream as any).destroy?.(error);
-          reject(error);
-        };
-
-        const succeed = () => {
-          if (settled) return;
-          settled = true;
-          clearTimers();
-          resolve();
-        };
-
-        const resetIdleTimer = () => {
-          clearTimers();
-
-          // Log every 60s of silence so the user knows the build is still alive
-          keepaliveTimer = setInterval(() => {
-            idleMinutes += 1;
-            log.log(`Still building... (no output for ${idleMinutes}m)`);
-          }, 60_000);
-          if ((keepaliveTimer as any).unref) (keepaliveTimer as any).unref();
-
-          idleTimer = setTimeout(() => {
-            fail(new Error(
-              "Docker build produced no output for 15 minutes. This usually means the remote server cannot reach the package registry, has broken DNS, or the Docker daemon stalled during the build.",
-            ));
-          }, DOCKER_BUILD_IDLE_TIMEOUT_MS);
-          if ((idleTimer as any).unref) (idleTimer as any).unref();
-        };
-
-        resetIdleTimer();
-
-        this.docker.modem.followProgress(
-          stream,
-          (err: Error | null) => {
-            if (err) {
-              fail(err);
-              return;
-            }
-            succeed();
-          },
-          (event: {
-            stream?: string;
-            error?: string;
-            errorDetail?: { message?: string };
-            status?: string;
-            id?: string;
-            progress?: string;
-            aux?: unknown;
-          }) => {
-            resetIdleTimer();
-            fatalBuildError ??= this.handleBuildEvent(event, log);
-          },
-        );
-      });
-
-      log.log("Docker daemon finished streaming build output. Finalizing image...\n");
-
-      if (fatalBuildError) {
-        throw new Error(fatalBuildError);
+      if (sshExecutor) {
+        // ── Fast SSH path ──────────────────────────────────────────────
+        // Bypass dockerode for the upload — it tars and POSTs the context
+        // as one HTTP body through SSH-tunneled-HTTP, which is ~1-2 MB/s.
+        // Instead: use the same tar-over-SSH pipe bare deploys use (with
+        // per-3s `~X% · Y MB sent · Z MB/s` progress), then run native
+        // `docker build` on the remote so its real stdout/stderr streams
+        // back uninterpreted.
+        await this.buildViaSshTarPipe(config, buildContext, tag, log);
+      } else {
+        // ── Dockerode path (local socket, TCP, or SSH without executor) ─
+        await this.buildViaDockerode(config, buildContext, tag, log);
       }
 
       try {
@@ -518,7 +711,8 @@ export class DockerRuntime implements RuntimeAdapter {
       }
 
       log.log(`Image ${tag} is ready.\n`);
-      log.step("build", "completed", `Image ${tag} built successfully`);
+      log.log(`[build] ✓ Image ${tag} ready`);
+      log.step("build", "completed", `Finalizing image ${tag}`);
       const durationMs = Date.now() - startTime;
       return { sessionId: config.sessionId, status: "deploying", imageRef: tag, durationMs };
     } catch (err) {

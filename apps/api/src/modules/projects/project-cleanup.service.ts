@@ -321,7 +321,8 @@ export async function collectDeploymentManifest(
   _project: Project | null,
 ): Promise<CleanupManifest> {
   const resources: CleanupResource[] = [];
-  const serviceContainerIds = (await repos.service.listByDeployment(dep.id))
+  const serviceRows = await repos.service.listByDeployment(dep.id).catch(() => []);
+  const serviceContainerIds = serviceRows
     .map((r) => r.containerId)
     .filter((id): id is string => !!id);
   const containerIds = [
@@ -334,21 +335,37 @@ export async function collectDeploymentManifest(
     ),
   ];
 
-  if (containerIds.length > 0) {
-    let runtime: RuntimeAdapter;
-    try {
-      ({ runtime } = await resolveDeploymentRuntime(dep));
-    } catch {
-      return { projectId: dep.projectId, resources };
-    }
+  // Resolve the runtime once. Anything below this point that depends on the
+  // runtime (containers, images) only fires when the runtime is reachable.
+  let runtime: RuntimeAdapter | null = null;
+  try {
+    runtime = (await resolveDeploymentRuntime(dep)).runtime;
+  } catch {
+    return { projectId: dep.projectId, resources };
+  }
 
-    for (const containerId of containerIds) {
-      resources.push({
-        type: "container",
-        ref: containerId,
-        label: `container ${containerId.slice(0, 12)}`,
-        runtime,
-      });
+  for (const containerId of containerIds) {
+    resources.push({
+      type: "container",
+      ref: containerId,
+      label: `container ${containerId.slice(0, 12)}`,
+      runtime,
+    });
+  }
+
+  // Images — main deployment imageRef + per-service imageRef. Only Docker
+  // images need explicit removal (bare runtime artifacts are tied to the
+  // container destroy path). Deduplicated across the manifest.
+  if (runtime instanceof DockerRuntime) {
+    const seenImages = new Set<string>();
+    const pushImage = (ref: string | null | undefined, label: string) => {
+      if (!ref || seenImages.has(ref)) return;
+      seenImages.add(ref);
+      resources.push({ type: "image", ref, label, runtime });
+    };
+    pushImage(dep.imageRef, `image ${(dep.imageRef ?? "").slice(0, 24)}`);
+    for (const sd of serviceRows) {
+      pushImage(sd.imageRef, `service image ${(sd.imageRef ?? "").slice(0, 24)}`);
     }
   }
 
@@ -546,6 +563,12 @@ async function cleanupProjectResources(
     }
   }
 
-  // 3. DB cleanup (hard-delete deployments + build sessions).
+  // 3. DB cleanup (hard-delete deployments + build sessions + services).
+  //    Project soft-delete only sets `deletedAt` and the FK cascades only
+  //    fire on hard-delete, so service rows survive otherwise. Without this
+  //    call those rows would sit forever as zombies under a deleted project.
+  //    Order matters: deployments first (their FK cascades remove
+  //    serviceDeployment rows), then services (no FK dependents left).
   await repos.deployment.deleteByProjectId(project.id);
+  await repos.service.deleteByProjectId(project.id);
 }

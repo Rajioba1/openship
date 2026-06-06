@@ -1,10 +1,12 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { usePlatform } from "@/context/PlatformContext";
+import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useToast } from "@/context/ToastContext";
-import { servicesApi, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
+import { serviceKind, servicesApi, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
+import { deployApi } from "@/lib/api/deploy";
 import { resolveServiceHostnameLabel } from "@repo/core";
 import {
   Play,
@@ -53,6 +55,7 @@ export function ServiceDetailPanel({
 }: ServiceDetailPanelProps) {
   const { baseDomain } = usePlatform();
   const { showToast } = useToast();
+  const { projectData } = useProjectSettings();
   const router = useRouter();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -60,12 +63,13 @@ export function ServiceDetailPanel({
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deploying, setDeploying] = useState(false);
   const status = container?.status ?? (service.enabled ? "stopped" : "disabled");
 
   const resolvedUrl = service.exposed
     ? service.domainType === "custom" && service.customDomain
       ? `https://${service.customDomain}`
-      : `https://${resolveServiceHostnameLabel(projectSlugBase, service.name, service.domain)}.${baseDomain}`
+      : `https://${resolveServiceHostnameLabel(projectSlugBase, service.name, service.domain, serviceKind(service))}.${baseDomain}`
     : null;
 
   const copy = (text: string, id: string) => {
@@ -97,6 +101,83 @@ export function ServiceDetailPanel({
       setSaving(false);
     }
   };
+
+  /**
+   * Deploy/start a service that has no live container yet. This is the
+   * "first-run" path — services.create() saves a DB row but doesn't start
+   * a container until the project deploys. Without this action the user's
+   * only option was the Disable toggle, which is the opposite of what
+   * they want.
+   *
+   * If the service is currently disabled, flip it enabled first — otherwise
+   * the redeploy pipeline would just skip it.
+   */
+  const handleDeployStart = async () => {
+    const activeDeploymentId = projectData?.activeDeploymentId;
+    if (!activeDeploymentId) {
+      showToast("Deploy the project first, then this service will start", "error", service.name);
+      return;
+    }
+    setDeploying(true);
+    try {
+      if (!service.enabled) {
+        await servicesApi.update(projectId, service.id, { enabled: true });
+      }
+      const res = await deployApi.buildRedeploy(activeDeploymentId);
+      if ((res as any)?.success === false) {
+        setDeploying(false);
+        showToast((res as any)?.error || "Deploy failed", "error", service.name);
+        return;
+      }
+      showToast(`${service.name} is starting`, "success", "Service");
+      // Don't release `deploying` here — buildRedeploy returns immediately
+      // while the deploy runs asynchronously on the backend. The polling
+      // effect below releases the state once a container shows up (or
+      // times out if the deploy fails / takes too long).
+    } catch (err) {
+      setDeploying(false);
+      const msg = err instanceof Error ? err.message : "Deploy failed";
+      showToast(msg, "error", service.name);
+    }
+  };
+
+  // While `deploying` is true, poll for the container to appear. The redeploy
+  // fires-and-forgets on the backend, so the only way to know it's done from
+  // the client is to watch the service's container state. As soon as a
+  // container id is bound, we release the loading state and the controls row
+  // automatically swaps the "Start service" CTA for Stop / Restart.
+  useEffect(() => {
+    if (!deploying) return;
+    // Container already came up between poll cycles — release immediately.
+    if (container?.containerId) {
+      setDeploying(false);
+      return;
+    }
+
+    let cancelled = false;
+    let elapsed = 0;
+    const POLL_INTERVAL = 4_000;
+    const POLL_TIMEOUT = 90_000;
+    const interval = setInterval(() => {
+      if (cancelled) return;
+      elapsed += POLL_INTERVAL;
+      void onRefresh();
+      if (elapsed >= POLL_TIMEOUT) {
+        clearInterval(interval);
+        setDeploying(false);
+        showToast(
+          "Still starting — check the logs for progress",
+          "error",
+          service.name,
+        );
+      }
+    }, POLL_INTERVAL);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [deploying, container?.containerId, onRefresh, service.name, showToast]);
 
   const handleUpdateService = async (data: ServiceInput) => {
     const result = await servicesApi.update(projectId, service.id, data);
@@ -210,7 +291,19 @@ export function ServiceDetailPanel({
                   )}
                 </>
               ) : (
-                <p className="text-sm text-muted-foreground">No container running</p>
+                <ActionButton
+                  icon={Play}
+                  label={
+                    deploying
+                      ? "Starting…"
+                      : service.enabled
+                        ? "Start service"
+                        : "Enable & start"
+                  }
+                  loading={deploying}
+                  onClick={handleDeployStart}
+                  variant="success"
+                />
               )}
             </div>
 

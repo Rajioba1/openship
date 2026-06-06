@@ -21,6 +21,7 @@ import type {
 } from "./project.schema";
 import { stat } from "node:fs/promises";
 import { repos, type Domain, type Project } from "@repo/db";
+import { encrypt } from "../../lib/encryption";
 import { deployLuaScripts } from "@repo/adapters";
 import { getOpenRestyPaths } from "@/lib/openresty-paths";
 import * as domainService from "../domains/domain.service";
@@ -283,6 +284,63 @@ export async function updateResources(c: Context) {
   const body = await c.req.json<TUpdateResourcesBody>();
   const resources = await projectService.updateResources(id, userId, body);
   return c.json({ data: resources });
+}
+
+// ─── Clone token (per-project override) ──────────────────────────────────────
+
+/**
+ * GET /projects/:id/clone-token — read-only state. Never returns the token,
+ * only whether one is set and when it was set last.
+ */
+export async function getCloneToken(c: Context) {
+  const userId = getUserId(c);
+  const id = param(c, "id");
+  const project = await projectService.getProject(id, userId);
+  return c.json({
+    hasToken: !!project.cloneTokenEncrypted,
+    setAt: project.cloneTokenSetAt?.toISOString() ?? null,
+  });
+}
+
+/**
+ * PATCH /projects/:id/clone-token — set/replace/clear the per-project clone token.
+ *
+ * Body:
+ *   { token?: string | null }
+ *
+ *   token === null → clear.
+ *   token: string  → encrypt and store. Empty string treated as clear.
+ *
+ * The token is encrypted on save and never echoed back. Resolves the chain
+ * tier: project token > user-global > App > mode default.
+ */
+export async function updateCloneToken(c: Context) {
+  const userId = getUserId(c);
+  const id = param(c, "id");
+  const body = await c.req.json().catch(() => ({}));
+  const rawToken = body?.token;
+
+  const project = await projectService.getProject(id, userId);
+
+  if (rawToken === null || rawToken === "") {
+    await repos.project.update(project.id, {
+      cloneTokenEncrypted: null,
+      cloneTokenSetAt: null,
+    });
+    return c.json({ hasToken: false, setAt: null });
+  }
+
+  if (typeof rawToken !== "string" || rawToken.length === 0) {
+    return c.json({ error: "token must be a non-empty string or null" }, 400);
+  }
+
+  await repos.project.update(project.id, {
+    cloneTokenEncrypted: encrypt(rawToken),
+    cloneTokenSetAt: new Date(),
+  });
+
+  const setAt = new Date().toISOString();
+  return c.json({ hasToken: true, setAt });
 }
 
 // ─── Local projects ──────────────────────────────────────────────────────────
@@ -1259,6 +1317,11 @@ export async function getInfo(c: Context) {
     isLoading: false,
     error: null,
   };
+
+  // No separate monorepoApps array: the Services API already returns all
+  // services (compose + monorepo, discriminated by `kind`). The dashboard
+  // filters that list when it wants only sub-apps. Adding a parallel array
+  // here would re-introduce the duplication the fan-out unification removed.
 
   // Fetch domains for this project
   const rawDomains = await listProjectRouteRows(id);

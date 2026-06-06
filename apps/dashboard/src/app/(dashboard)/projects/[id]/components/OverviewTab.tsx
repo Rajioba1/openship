@@ -59,9 +59,40 @@ export const OverviewTab = () => {
     return num?.toString() || "0";
   };
 
+  // Two-way render: skeleton until analyticsData lands, then real data.
+  //
+  // We trigger the skeleton on `!analyticsData` rather than
+  // `isLoadingAnalytics` because the loading flag in the context is
+  // unreliable from this component's perspective:
+  //
+  //   - On tab switch, the context's loading completed BEFORE this
+  //     component mounted → `isLoadingAnalytics` is already false,
+  //     `analyticsData` is whatever was cached. Gating on the loading
+  //     flag would never show the skeleton even on first paint.
+  //   - The refreshAnalytics dedup short-circuit returns BEFORE
+  //     flipping the loading flag, so re-mounts also miss it.
+  //
+  // Using `!analyticsData` as the trigger means: "no data yet → show
+  // skeleton". Holds regardless of how the loading flag is sequenced
+  // around the actual data arrival. Once `setAnalyticsData(...)` fires
+  // (even with all-empty inner fields), we flip to the real-data
+  // branch — its inline `|| "N/A"` fallbacks handle missing values.
+  type Stat = {
+    label: string;
+    value: string;
+    icon: React.ReactNode;
+    subtext?: string;
+    loading?: boolean;
+  };
   const hasAnalytics = !!analyticsData;
-  const stats = analyticsData
+  const stats: Stat[] = !analyticsData
     ? [
+        { label: "Server Requests", value: "", icon: <Server className="size-4" />, loading: true },
+        { label: "Unique IPs", value: "", icon: <Users className="size-4" />, loading: true },
+        { label: "Avg Response", value: "", icon: <Gauge className="size-4" />, loading: true },
+        { label: "Bandwidth Out", value: "", icon: <ArrowUpDown className="size-4" />, loading: true },
+      ]
+    : [
         {
           label: "Server Requests",
           value: formatNumber(analyticsData.summary?.uniqueRequests),
@@ -85,32 +116,6 @@ export const OverviewTab = () => {
           value: analyticsData.bandwidth?.totalOutFormatted || "N/A",
           icon: <ArrowUpDown className="size-4" />,
           subtext: `${analyticsData.bandwidth?.totalInFormatted} in`,
-        },
-      ]
-    : [
-        {
-          label: "Server Requests",
-          value: isLoadingAnalytics ? "..." : "0",
-          icon: <Server className="size-4" />,
-          subtext: isLoadingAnalytics ? "Loading..." : "No traffic recorded yet",
-        },
-        {
-          label: "Unique IPs",
-          value: isLoadingAnalytics ? "..." : "0",
-          icon: <Users className="size-4" />,
-          subtext: isLoadingAnalytics ? "Loading..." : "No visitors yet",
-        },
-        {
-          label: "Avg Response",
-          value: isLoadingAnalytics ? "..." : "N/A",
-          icon: <Gauge className="size-4" />,
-          subtext: isLoadingAnalytics ? "Loading..." : "Waiting for requests",
-        },
-        {
-          label: "Bandwidth",
-          value: isLoadingAnalytics ? "..." : "0 B",
-          icon: <ArrowUpDown className="size-4" />,
-          subtext: isLoadingAnalytics ? "Loading..." : "No transfer yet",
         },
       ];
 
@@ -172,9 +177,21 @@ export const OverviewTab = () => {
               <span className="text-primary [&>svg]:size-3.5">{s.icon}</span>
               <span className="text-[11px] text-muted-foreground font-medium">{s.label}</span>
             </div>
-            <p className="text-[18px] font-semibold text-foreground leading-tight">{s.value}</p>
-            {s.subtext && (
-              <p className="text-[10px] text-muted-foreground/60 mt-0.5">{s.subtext}</p>
+            {s.loading ? (
+              <>
+                {/* Skeleton bars roughly matching the value (large) and
+                    subtext (small) line heights so the card doesn't
+                    visibly jump when the data lands. */}
+                <div className="h-[18px] w-12 rounded bg-muted/60 animate-pulse" />
+                <div className="h-[10px] w-20 mt-1.5 rounded bg-muted/40 animate-pulse" />
+              </>
+            ) : (
+              <>
+                <p className="text-[18px] font-semibold text-foreground leading-tight">{s.value}</p>
+                {s.subtext && (
+                  <p className="text-[10px] text-muted-foreground/60 mt-0.5">{s.subtext}</p>
+                )}
+              </>
             )}
           </div>
         ))}

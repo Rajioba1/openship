@@ -120,6 +120,27 @@
       "when": 1779769200000,
       "tag": "0016_user_settings_deploy_defaults",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1779855600000,
+      "tag": "0017_clone_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1779942000000,
+      "tag": "0018_drop_server_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1780028400000,
+      "tag": "0019_mail_servers",
+      "breakpoints": true
     }
   ]
 }

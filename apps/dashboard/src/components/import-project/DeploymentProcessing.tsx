@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Loader2,
   Clock,
+  Trash2,
 } from "lucide-react";
 import type { Terminal } from "@xterm/xterm";
 import BuildTerminal from "./BuildTerminal";
@@ -18,6 +19,9 @@ import { resolveBuildElapsedMs } from "@/context/deployment/types";
 import { usePlatform } from "@/context/PlatformContext";
 import { useTheme } from "@/components/theme-provider";
 import { useModal } from "@/context/ModalContext";
+import { useToast } from "@/context/ToastContext";
+import { projectsApi } from "@/lib/api";
+import { DeletionModal } from "@/app/(dashboard)/projects/[id]/components/DeletionModal";
 
 interface DeploymentProcessingProps {
   onRedeploy: () => void; // Keep this as it updates URL
@@ -28,8 +32,74 @@ const DeploymentProcessing: React.FC<DeploymentProcessingProps> = ({ onRedeploy 
   const { baseDomain } = usePlatform();
   const { resolvedTheme } = useTheme();
   const { showModal, hideModal } = useModal();
+  const { showToast } = useToast();
   const router = useRouter();
   const promptModalRef = React.useRef<string | null>(null);
+
+  // ── First-deploy-failed → offer to delete the project ─────────────────────
+  // When a project's very first deployment fails, the operator is stuck:
+  // there's no point keeping the row around, and the only way to drop it
+  // is to navigate to /projects/[id] → Advanced → Delete. That's hidden
+  // behind a successful render of the project view (which itself may
+  // misbehave when no deploy ever worked). We surface the same modal
+  // right here on the build screen so the wrong-turn → cleanup loop is
+  // one click instead of three.
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [projectName, setProjectName] = useState<string | null>(null);
+  const [isFirstDeployment, setIsFirstDeployment] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  useEffect(() => {
+    // Only probe on failure (cancelled deploys aren't necessarily "first
+    // attempt broken") and only once we have a project id.
+    if (deploymentStatus !== "failed" || !state.projectId) return;
+    let cancelled = false;
+    Promise.all([
+      projectsApi.getInfo(state.projectId).catch(() => null),
+      projectsApi.getDeployments(state.projectId).catch(() => null),
+    ]).then(([info, deps]) => {
+      if (cancelled) return;
+      // Project name powers the modal's "type to confirm" field. Falling
+      // back to config.repo keeps the modal usable even if getInfo fails
+      // — operator can still type whatever name we display.
+      const name = info?.project?.name ?? info?.name ?? config.projectName ?? config.repo ?? "project";
+      setProjectName(name);
+      const list: unknown[] =
+        Array.isArray(deps?.data) ? deps!.data
+        : Array.isArray(deps?.deployments) ? deps!.deployments
+        : Array.isArray(deps) ? deps
+        : [];
+      // "First deployment" = the only deployment that ever existed for
+      // this project. If the operator retries (count >= 2), the button
+      // hides and they use the normal Advanced-tab flow.
+      setIsFirstDeployment(list.length <= 1);
+    });
+    return () => { cancelled = true; };
+  }, [deploymentStatus, state.projectId, config.projectName, config.repo]);
+
+  const handleDeleteProject = useCallback(
+    async (deleteApp = true, wipeVolumes = false) => {
+      if (!state.projectId || isDeleting) return;
+      setIsDeleting(true);
+      try {
+        const response = await projectsApi.delete(state.projectId, { deleteApp, wipeVolumes });
+        if (response.success) {
+          showToast(
+            deleteApp ? "Project deleted" : "Environment deleted",
+            "success",
+          );
+          router.push("/");
+        } else {
+          showToast(response.message || response.error || "Failed to delete project", "error");
+          setIsDeleting(false);
+        }
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "Failed to delete project", "error");
+        setIsDeleting(false);
+      }
+    },
+    [state.projectId, isDeleting, showToast, router],
+  );
 
   const renderPromptDetails = useCallback((details?: Record<string, unknown>) => {
     if (!details) return null;
@@ -482,12 +552,27 @@ const DeploymentProcessing: React.FC<DeploymentProcessingProps> = ({ onRedeploy 
                   )}
                 </button>
               ) : (deploymentStatus === "failed" || deploymentStatus === "cancelled") ? (
-                <button
-                  onClick={onRedeploy}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl transition-all font-medium text-sm hover:bg-primary/90"
-                >
-                  Redeploy
-                </button>
+                <div className="space-y-2">
+                  <button
+                    onClick={onRedeploy}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl transition-all font-medium text-sm hover:bg-primary/90"
+                  >
+                    Redeploy
+                  </button>
+                  {/* Delete-project escape hatch — only on the project's
+                      FIRST failed deployment. After the operator retries,
+                      this hides and they use the Advanced-tab flow. */}
+                  {deploymentStatus === "failed" && isFirstDeployment && state.projectId && (
+                    <button
+                      onClick={() => setShowDeleteModal(true)}
+                      disabled={isDeleting}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl transition-all font-medium text-sm border border-destructive/20 bg-destructive/5 text-destructive hover:bg-destructive/10 hover:border-destructive/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Trash2 className="size-4" />
+                      {isDeleting ? "Deleting…" : "Delete project"}
+                    </button>
+                  )}
+                </div>
               ) : (deploymentStatus === "ready") ? (
                 <button
                   onClick={handleViewDashboard}
@@ -502,6 +587,14 @@ const DeploymentProcessing: React.FC<DeploymentProcessingProps> = ({ onRedeploy 
           </div>
         </div>
       </div>
+
+      <DeletionModal
+        isOpen={showDeleteModal}
+        onClose={() => setShowDeleteModal(false)}
+        onConfirm={handleDeleteProject}
+        projectName={projectName ?? config.repo ?? "project"}
+        projectId={state.projectId ?? undefined}
+      />
     </div>
   );
 };

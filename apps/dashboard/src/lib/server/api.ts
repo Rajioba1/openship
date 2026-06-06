@@ -15,6 +15,54 @@ import { getApiOriginFromHeaders } from "@/lib/api/urls";
 
 const DEFAULT_TIMEOUT = 10_000;
 
+/**
+ * Parse a raw Set-Cookie header into the shape Next.js `cookies().set()`
+ * accepts. Supports the attributes the API actually uses: Path, Domain,
+ * Expires, Max-Age, HttpOnly, Secure, SameSite. Unknown attributes are
+ * ignored. Returns null when the header is unparseable (no `=`).
+ */
+type ParsedSetCookie = {
+  name: string;
+  value: string;
+  options: {
+    path?: string;
+    domain?: string;
+    expires?: Date;
+    maxAge?: number;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: "lax" | "strict" | "none";
+  };
+};
+function parseSetCookie(raw: string): ParsedSetCookie | null {
+  const parts = raw.split(";").map((s) => s.trim());
+  const first = parts.shift();
+  if (!first) return null;
+  const eq = first.indexOf("=");
+  if (eq < 0) return null;
+  const name = first.slice(0, eq);
+  const value = first.slice(eq + 1);
+  const options: ParsedSetCookie["options"] = {};
+  for (const attr of parts) {
+    const lower = attr.toLowerCase();
+    if (lower === "httponly") options.httpOnly = true;
+    else if (lower === "secure") options.secure = true;
+    else if (lower.startsWith("path=")) options.path = attr.slice(5);
+    else if (lower.startsWith("domain=")) options.domain = attr.slice(7);
+    else if (lower.startsWith("max-age=")) {
+      const n = Number(attr.slice(8));
+      if (!Number.isNaN(n)) options.maxAge = n;
+    } else if (lower.startsWith("expires=")) {
+      const d = new Date(attr.slice(8));
+      if (!Number.isNaN(d.getTime())) options.expires = d;
+    } else if (lower.startsWith("samesite=")) {
+      const v = attr.slice(9).toLowerCase();
+      if (v === "lax" || v === "strict" || v === "none") options.sameSite = v;
+    }
+  }
+  return { name, value, options };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
 /* ------------------------------------------------------------------ */
@@ -98,6 +146,42 @@ async function request<T = unknown>(
       ...(cache !== undefined ? { cache } : {}),
       ...(revalidate !== undefined ? { next: { revalidate } } : {}),
     });
+
+    // Forward Set-Cookie headers from the API back to the browser.
+    //
+    // The dashboard server proxies requests to the API on the user's
+    // behalf — the API runs at a different origin (localhost:4000 in
+    // dev, also separately mounted in prod). When the API sets a
+    // session cookie via Set-Cookie, that header lands on THIS server,
+    // not on the browser. Without forwarding it, the browser never
+    // gets the cookie and any flow that depends on a cookie being
+    // minted server-side (the zero-auth /get-session bootstrap, for
+    // example) silently fails — every page render mints a fresh
+    // session that the browser then forgets, producing an infinite
+    // redirect loop between the dashboard middleware (cookie check)
+    // and (auth)/layout (session check).
+    //
+    // We propagate every Set-Cookie from the API verbatim — same name,
+    // value, and attributes. The API is trusted (we control both
+    // sides), so we don't filter by name. Errors during the cookies()
+    // call (which can happen if invoked outside a request context like
+    // a generateStaticParams build) are swallowed — those code paths
+    // don't need session cookies anyway.
+    try {
+      const setCookies =
+        typeof (res.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie === "function"
+          ? (res.headers as Headers & { getSetCookie: () => string[] }).getSetCookie()
+          : [];
+      if (setCookies.length > 0) {
+        const cookieStore = await cookies();
+        for (const raw of setCookies) {
+          const parsed = parseSetCookie(raw);
+          if (parsed) cookieStore.set(parsed.name, parsed.value, parsed.options);
+        }
+      }
+    } catch {
+      /* outside request context — no response to attach cookies to */
+    }
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");

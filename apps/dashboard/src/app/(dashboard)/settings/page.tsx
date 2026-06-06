@@ -11,6 +11,7 @@ import { DeployDefaults } from "./_components/DeployDefaults";
 import { ServerConnection } from "./_components/ServerConnection";
 import { CloudConnection } from "./_components/CloudConnection";
 import { GitHubConnection } from "./_components/GitHubConnection";
+import { CloneCredentials } from "./_components/CloneCredentials";
 import { InstanceInfo } from "./_components/InstanceInfo";
 import { PageContainer } from "@/components/ui/PageContainer";
 
@@ -68,6 +69,7 @@ function SettingsPageInner() {
           {/* ── LEFT COLUMN ── */}
           <div className="space-y-6 min-w-0">
             <GitHubConnection />
+            <CloneCredentials />
             {showDeployDefaults && <DeployDefaults />}
             {showBuildPreferences && <BuildPreferences />}
             {showServerConnection && <ServerConnection />}

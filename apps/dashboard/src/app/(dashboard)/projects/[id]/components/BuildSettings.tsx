@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Inbox } from "lucide-react";
+import { ChevronDown, ChevronUp, Inbox, Layers, ArrowRight } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { EnvironmentSettings } from "./EnvironmentSettings";
 import { projectsApi } from "@/lib/api";
@@ -7,8 +8,18 @@ import { useToast } from "@/context/ToastContext";
 import BuildSettingsComponent from "@/components/import-project/BuildSettings";
 
 export const BuildSettings = () => {
-  const { buildData, updateBuild, projectData, id } = useProjectSettings();
+  const { buildData, updateBuild, projectData, servicesData, id } = useProjectSettings();
+  const router = useRouter();
   const isWebmail = projectData?.framework === "webmail";
+  // When the project deploys via services (compose containers or monorepo
+  // sub-apps), per-service build settings live on the service rows — there's
+  // no single project-level "build command" to edit. The project-level form
+  // would compete with the per-service config and confuse users about where
+  // the source of truth lives. Show a pointer to the Services tab instead.
+  const services = servicesData.services;
+  const hasServices = services.length > 0;
+  const monorepoCount = services.filter((s) => s.kind === "monorepo").length;
+  const composeCount = services.length - monorepoCount;
 
   const [showEnvironment, setShowEnvironment] = useState(false);
 
@@ -45,6 +56,18 @@ export const BuildSettings = () => {
     setLoading({ ...loading, [field]: false });
   };
 
+  // Build a description that matches the actual service mix — no
+  // generic "you have services," tell them which kinds and how many.
+  const serviceLabel = (() => {
+    if (monorepoCount && composeCount) {
+      return `${monorepoCount} sub-app${monorepoCount === 1 ? "" : "s"} and ${composeCount} compose service${composeCount === 1 ? "" : "s"}`;
+    }
+    if (monorepoCount) {
+      return `${monorepoCount} sub-app${monorepoCount === 1 ? "" : "s"}`;
+    }
+    return `${composeCount} compose service${composeCount === 1 ? "" : "s"}`;
+  })();
+
   return (
     <div className="max-w-5xl space-y-6">
         {isWebmail ? (
@@ -62,6 +85,36 @@ export const BuildSettings = () => {
                   build, and run commands are not configurable — redeploy from
                   the mail overview to pick up upstream changes.
                 </p>
+              </div>
+            </div>
+          </div>
+        ) : hasServices ? (
+          // Service-based project (compose and/or monorepo). The project-level
+          // build form doesn't apply — each service has its own settings on
+          // the service row. Send the user to the right place instead of
+          // showing a competing form that would silently no-op.
+          <div className="bg-card rounded-2xl border border-border/50 p-6">
+            <div className="flex items-start gap-4">
+              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                <Layers className="w-5 h-5 text-primary" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h2 className="text-lg font-semibold text-foreground mb-1">
+                  Per-service settings
+                </h2>
+                <p className="text-sm text-muted-foreground mb-4">
+                  This project has {serviceLabel}. Build commands, framework,
+                  ports, and run commands live on each service row — edit
+                  them in the Services tab.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => router.push(`/projects/${id}/services`)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                >
+                  Open Services
+                  <ArrowRight className="size-3.5" />
+                </button>
               </div>
             </div>
           </div>

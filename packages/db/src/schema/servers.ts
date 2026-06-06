@@ -1,12 +1,14 @@
-import { pgTable, text, integer, timestamp, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, timestamp } from "drizzle-orm/pg-core";
 
 // ─── Servers ─────────────────────────────────────────────────────────────────
 
 /**
- * SSH server configurations for deployments.
+ * SSH server configurations.
  *
- * Multiple rows — one per configured server. Replaces the SSH fields
- * that were previously embedded in the singleton `instance_settings` row.
+ * One row per configured host. There's no kind / role flag — any server
+ * can host apps, the mail stack, or both. Whether mail is installed on a
+ * given host is derived at runtime from the mail-state.json the install
+ * pipeline writes, not from a schema column.
  */
 export const servers = pgTable("servers", {
   id: text("id")
@@ -15,26 +17,6 @@ export const servers = pgTable("servers", {
 
   /** Human-readable label — defaults to sshHost when not set */
   name: text("name"),
-
-  // ── Server capabilities ──────────────────────────────────────────────────
-  //
-  // Two orthogonal booleans rather than a 3-valued enum — composes cleanly
-  // for any combination (apps-only, mail-only, both). The dashboard's
-  // "What does this server run?" picker writes these flags directly.
-  //
-  //   runsApps = true  → openship deploys apps here (Docker / bare runtime).
-  //                      Component installer is allowed to install Docker,
-  //                      rsync, certbot, etc.
-  //   runsMail = true  → mail-server provisioning pipeline can target this
-  //                      host (rsync engine + run iRedMail.sh).
-  //
-  // Both flags can be true on the same row — a small self-hosted setup
-  // where one VPS runs apps + iRedMail side by side.
-
-  /** Whether this server hosts app deployments (Docker / bare runtime). */
-  runsApps: boolean("runs_apps").notNull().default(true),
-  /** Whether this server hosts the iRedMail mail server (Postfix + Dovecot + …). */
-  runsMail: boolean("runs_mail").notNull().default(false),
 
   // ── SSH credentials ────────────────────────────────────────────────────────
 

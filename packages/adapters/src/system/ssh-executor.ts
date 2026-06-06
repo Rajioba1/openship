@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
+import { Transform } from "node:stream";
 
 import { getTarCreateEnv } from "../archive";
 import type { CommandExecutor, LogEntry, SshConfig } from "../types";
@@ -289,10 +290,15 @@ export class SshExecutor implements CommandExecutor {
     localCmd: string,
     remoteCmd: string,
     onLog?: (log: LogEntry) => void,
+    onBytes?: (bytes: number) => void,
   ): Promise<{ code: number }> {
     const client = await this.connect();
 
     return new Promise((resolve, reject) => {
+      // Surface the local command so a hang at "0 B sent" tells the
+      // operator exactly what to run by hand to reproduce.
+      onLog?.(logEntry(`local: ${localCmd}`));
+
       client.exec(remoteCmd, (err, channel) => {
         if (err) return reject(err);
 
@@ -301,24 +307,128 @@ export class SshExecutor implements CommandExecutor {
           env: getTarCreateEnv(),
         });
 
-        local.stdout.pipe(channel);
+        let localExited = false;
+        let localExitCode: number | null = null;
+        let localStderrBuffer = "";
+
+        if (onBytes) {
+          // Backpressure-preserving Transform between local.stdout and the
+          // SSH channel — counts every chunk passing through without
+          // breaking node's pipe flow control. The pipe still closes the
+          // channel on local.stdout end.
+          const counter = new Transform({
+            transform(chunk: Buffer, _enc, cb) {
+              onBytes(chunk.length);
+              cb(null, chunk);
+            },
+          });
+          local.stdout.pipe(counter).pipe(channel);
+        } else {
+          local.stdout.pipe(channel);
+        }
 
         local.stderr.on("data", (data: Buffer) => {
-          const text = data.toString().trim();
-          if (text && onLog) onLog(logEntry(text, "warn"));
+          const text = data.toString();
+          localStderrBuffer += text;
+          const trimmed = text.trim();
+          if (trimmed && onLog) onLog(logEntry(`local stderr: ${trimmed}`, "warn"));
         });
 
         channel.stderr.on("data", (data: Buffer) => {
           const text = data.toString().trim();
-          if (text && onLog) onLog(logEntry(text, "warn"));
+          if (text && onLog) onLog(logEntry(`remote stderr: ${text}`, "warn"));
+        });
+
+        // Local process exit — distinct from the SSH channel close. If
+        // local exits non-zero we MUST surface that, otherwise the channel
+        // keeps the heartbeat ticking and the operator sees "0 B sent"
+        // forever with no clue why.
+        local.on("exit", (code, signal) => {
+          localExited = true;
+          localExitCode = code;
+          if (onLog) {
+            const detail = signal
+              ? `signal=${signal}`
+              : `code=${code ?? "null"}`;
+            onLog(
+              logEntry(
+                `local process exited (${detail})${localStderrBuffer ? ` · stderr=${localStderrBuffer.trim()}` : ""}`,
+                code === 0 ? "info" : "error",
+              ),
+            );
+          }
+          if (code !== 0) {
+            // Force-close the channel so the outer promise resolves and
+            // the caller can surface the real failure instead of hanging.
+            try {
+              channel.end();
+              channel.close();
+            } catch {
+              /* channel may already be gone */
+            }
+            return;
+          }
+          // Clean local exit. Two-step shutdown:
+          //
+          //   1. Send EOF politely via channel.end() so the remote tar
+          //      sees end-of-stdin and finishes extracting. We wait one
+          //      tick first so any data still in the Transform's
+          //      internal buffer can drain to the channel.
+          //
+          //   2. Arm a watchdog. If the channel still hasn't closed
+          //      after `REMOTE_DRAIN_GRACE_MS`, the remote side is
+          //      stuck (slow disk, hung tar, network anomaly, ssh2 EOF
+          //      not propagating — we've seen all four). At that point
+          //      all bytes are already on the wire so it's safe to
+          //      force-close. Without this, the channel hangs at "82%"
+          //      indefinitely until the 15-min idle timeout fires.
+          //
+          // The watchdog is cancelled if channel.on('close') fires
+          // naturally, which it does on healthy networks within ~1s.
+          setImmediate(() => {
+            try {
+              channel.end();
+            } catch {
+              /* channel may already be ending */
+            }
+          });
+          const REMOTE_DRAIN_GRACE_MS = 30_000;
+          const watchdog = setTimeout(() => {
+            if (onLog) {
+              onLog(
+                logEntry(
+                  `Local pipe finished but SSH channel didn't close after ${
+                    REMOTE_DRAIN_GRACE_MS / 1000
+                  }s — forcing close (remote tar may be stuck or ssh2 EOF didn't propagate).`,
+                  "warn",
+                ),
+              );
+            }
+            try {
+              channel.close();
+            } catch {
+              /* channel may already be closed */
+            }
+          }, REMOTE_DRAIN_GRACE_MS);
+          (watchdog as { unref?: () => void }).unref?.();
+          channel.once("close", () => clearTimeout(watchdog));
         });
 
         channel.on("close", (code: number) => {
+          // If the channel closes "cleanly" (code 0) but the local
+          // process actually failed, surface the local failure instead.
+          if (localExited && localExitCode !== null && localExitCode !== 0) {
+            return reject(
+              new Error(
+                `Local pipe command failed (exit ${localExitCode})${localStderrBuffer ? ": " + localStderrBuffer.trim() : ""}`,
+              ),
+            );
+          }
           resolve({ code: code ?? 1 });
         });
 
         local.on("error", (e) => {
-          reject(new Error(`Local process failed: ${e.message}`));
+          reject(new Error(`Local process failed to start: ${e.message}`));
         });
       });
     });
@@ -347,11 +457,14 @@ export class SshExecutor implements CommandExecutor {
         localCmd: string,
         remoteCmd: string,
         logCb?: (log: LogEntry) => void,
-      ) => this.pipeLocal(localCmd, remoteCmd, logCb),
+        onBytes?: (bytes: number) => void,
+      ) => this.pipeLocal(localCmd, remoteCmd, logCb, onBytes),
     };
 
     if (options?.mode === "tar") {
-      onLog?.(logEntry("Streaming source as a tar pipe over the existing SSH connection..."));
+      // The tar helper itself emits a "Streaming X MB…" line once it has
+      // sized the directory, plus per-checkpoint progress and a final
+      // throughput line. No need for a redundant pre-log here.
       await transferRemoteDirectoryWithTar(localPath, remotePath, deps, onLog, options);
       return;
     }
