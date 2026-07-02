@@ -123,4 +123,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[AGPL-3.0](LICENSE)
+Openship is **source-available** software: [AGPL-3.0 with the Commons Clause](LICENSE).
+
+You may run, modify, and self-host it — including for internal commercial or
+company use — under the AGPL-3.0 terms. Offering Openship to third parties as a
+hosted, managed, or **SaaS** service is reserved to **Openship and Oblien LLC**;
+any other party needs a separate commercial license from Oblien LLC. Because of
+the Commons Clause, this is **not** an OSI-approved open-source license.

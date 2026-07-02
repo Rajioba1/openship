@@ -1,8 +1,8 @@
 {
   "name": "openship",
   "version": "0.1.1",
-  "description": "Open-source, self-hostable deployment platform",
-  "license": "MIT",
+  "description": "Source-available, self-hostable deployment platform",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "https://github.com/oblien/openship.git"

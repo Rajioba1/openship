@@ -3,6 +3,7 @@
 import React, { useState, useCallback, useEffect } from "react";
 import {
   Layers,
+  Boxes,
   Globe,
   Lock,
   KeyRound,
@@ -17,7 +18,6 @@ import {
 } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usePlatform } from "@/context/PlatformContext";
-import { STACK_ICONS } from "@repo/core";
 import {
   usesServiceDeployment,
   type ComposeServiceInfo,
@@ -611,7 +611,6 @@ const ServiceCard: React.FC<{
 
 const ComposeServices: React.FC = () => {
   const { config, updateConfig } = useDeployment();
-  const iconUrl = STACK_ICONS["docker-compose"];
 
   const services = config.services || [];
   const sharedEnvVars = config.envVars || [];
@@ -683,11 +682,7 @@ const ComposeServices: React.FC = () => {
           {/* Header */}
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-primary/10 rounded-xl">
-              {iconUrl ? (
-                <img src={iconUrl} alt="Docker Compose" className="w-6 h-6" />
-              ) : (
-                <Layers className="w-6 h-6 text-primary" />
-              )}
+              <Boxes className="w-6 h-6 text-primary" />
             </div>
             <div>
               <h3 className="text-[15px] font-semibold text-foreground">Docker Compose</h3>

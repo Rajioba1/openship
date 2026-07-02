@@ -274,6 +274,23 @@ export const env: Env = {
   PORT: runtimeTarget.ports.api,
 };
 
+/**
+ * Redis REQUIRED — when true the job runner, cache-store and rate-limit store
+ * force their Redis-backed implementations and SKIP the reachability probe, so
+ * there is NO silent in-memory fallback (which would break shared state across
+ * replicas). Defaults ON whenever CLOUD_MODE is set — a multi-tenant SaaS must
+ * share job queue / cache / rate-limit state across every instance. Self-hosted
+ * single-box installs keep the auto-probe + in-memory fallback. Explicit
+ * override: OPENSHIP_REQUIRE_REDIS=true|false (read raw so "unset" ≠ "false").
+ */
+const requireRedisRaw = (process.env.OPENSHIP_REQUIRE_REDIS ?? "").toLowerCase().trim();
+export const REDIS_REQUIRED =
+  requireRedisRaw === "true" || requireRedisRaw === "1"
+    ? true
+    : requireRedisRaw === "false" || requireRedisRaw === "0"
+      ? false
+      : env.CLOUD_MODE;
+
 // Safety guard — never boot on a deployable target with the placeholder
 // auth secret. `local` is allowed because that's pure-dev / desktop.
 // The secret is a real secret in every saas-shaped deployment.

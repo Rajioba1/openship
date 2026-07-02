@@ -13,7 +13,7 @@
  */
 
 import IORedis from "ioredis";
-import { env } from "../../config/env";
+import { env, REDIS_REQUIRED } from "../../config/env";
 import { MemoryRateLimitStore } from "./memory-store";
 import { RedisRateLimitStore } from "./redis-store";
 import { getPolicy, type PolicyId } from "./policies";
@@ -64,6 +64,9 @@ async function pickBackend(): Promise<Backend> {
     .trim();
   if (override === "memory") return "memory";
   if (override === "redis") return "redis";
+  // Redis required (CLOUD_MODE / OPENSHIP_REQUIRE_REDIS): force redis, skip the
+  // probe — per-replica in-memory counters would under-count the aggregate.
+  if (REDIS_REQUIRED) return "redis";
   return (await isRedisReachable()) ? "redis" : "memory";
 }
 

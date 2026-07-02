@@ -86,7 +86,7 @@ export function AdoptMailModal({
   return (
     <Modal isOpen={isOpen} onClose={close} title="Adopt existing mail server">
       <div className="space-y-4">
-        <p className="text-sm text-gray-600">
+        <p className="text-sm text-muted-foreground">
           Already set up a mail server with Openship on one of your servers? Pick it and scan — if a
           mail stack is found, it&apos;s re-adopted into the dashboard without reinstalling or
           touching your data.
@@ -98,19 +98,19 @@ export function AdoptMailModal({
           type="button"
           onClick={handleScan}
           disabled={!server || scanning || adopting}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-gray-200 bg-white text-sm font-medium text-gray-800 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {scanning ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
           {scanning ? "Scanning…" : "Scan server"}
         </button>
 
         {result?.adoptable && (
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-gray-800 space-y-1.5">
-            <div className="flex items-center gap-2 font-medium text-emerald-700">
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-foreground space-y-1.5">
+            <div className="flex items-center gap-2 font-medium text-emerald-600 dark:text-emerald-400">
               <CheckCircle2 className="size-4" /> Mail server detected
             </div>
             <p>Domain: <span className="font-semibold">{result.domain ?? "unknown"}</span></p>
-            <p className="text-gray-600">
+            <p className="text-muted-foreground">
               iRedMail running: {result.iredmailInstalled ? "yes" : "no"} · Install:{" "}
               {result.installComplete ? "complete" : "in progress"} · Webmail:{" "}
               {result.webmailPresent ? "present" : "not deployed"}
@@ -119,7 +119,7 @@ export function AdoptMailModal({
         )}
 
         {error && (
-          <div className="flex items-start gap-2 text-sm text-red-600">
+          <div className="flex items-start gap-2 text-sm text-destructive">
             <AlertCircle className="size-4 mt-0.5 shrink-0" />
             <span>{error}</span>
           </div>
@@ -129,7 +129,7 @@ export function AdoptMailModal({
           <button
             type="button"
             onClick={close}
-            className="px-4 py-2 rounded-xl border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+            className="px-4 py-2 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors"
           >
             Cancel
           </button>

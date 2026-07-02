@@ -8,6 +8,11 @@ const withMDX = createMDX({ configPath: "./source.config.ts" });
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  // Monorepo: trace from the repo root so the standalone bundle includes the
+  // root-hoisted node_modules + workspace packages. Without this, `output:
+  // "standalone"` traces from apps/web and can ship an incomplete bundle that
+  // fails at runtime with "cannot find module".
+  outputFileTracingRoot: path.resolve(__dirname, "../.."),
   transpilePackages: ["@repo/ui", "@repo/core"],
   turbopack: {
     root: path.resolve(__dirname, "../.."),

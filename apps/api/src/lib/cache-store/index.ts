@@ -17,7 +17,7 @@
  */
 
 import IORedis from "ioredis";
-import { env } from "../../config/env";
+import { env, REDIS_REQUIRED } from "../../config/env";
 import { MemoryCacheStore } from "./memory";
 import { RedisCacheStore } from "./redis";
 import type { CacheStore, CacheStoreOptions } from "./types";
@@ -69,6 +69,9 @@ async function pickBackend(): Promise<Backend> {
   const override = (process.env.OPENSHIP_CACHE_STORE ?? "").toLowerCase().trim();
   if (override === "memory") return "memory";
   if (override === "redis") return "redis";
+  // Redis required (CLOUD_MODE / OPENSHIP_REQUIRE_REDIS): force redis, skip the
+  // probe — no silent per-replica memory cache that would drift across instances.
+  if (REDIS_REQUIRED) return "redis";
   return (await isRedisReachable()) ? "redis" : "memory";
 }
 

@@ -1,3 +1,71 @@
+Openship — License
+
+Copyright (c) 2026 Oblien LLC. All rights reserved.
+"Openship" and the Openship name and logo are trademarks of Oblien LLC.
+
+Openship is SOURCE-AVAILABLE software. It is licensed under the GNU Affero
+General Public License, version 3.0 (the "AGPL", the full text of which is
+reproduced below), AS MODIFIED by the "Commons Clause" License Condition v1.0
+set out immediately below. Where the Commons Clause condition conflicts with
+the AGPL, the Commons Clause condition controls.
+
+Because of the Commons Clause condition, this is NOT an OSI-approved
+open-source license. Do not describe it as plain "AGPL-3.0"; refer to it as
+"AGPL-3.0 with Commons Clause".
+
+-------------------------------------------------------------------------------
+"Commons Clause" License Condition v1.0
+
+The Software is provided to you by the Licensor under the License, as defined
+below, subject to the following condition.
+
+Without limiting other conditions in the License, the grant of rights under
+the License will not include, and the License does not grant to you, the right
+to Sell the Software.
+
+For purposes of the foregoing, "Sell" means practicing any or all of the rights
+granted to you under the License to provide to third parties, for a fee or
+other consideration (including without limitation fees for hosting or
+consulting/support services related to the Software), a product or service
+whose value derives, entirely or substantially, from the functionality of the
+Software. Any license notice or attribution required by the License must also
+include this Commons Clause License Condition notice.
+
+Software: Openship
+License:  GNU Affero General Public License v3.0
+Licensor: Oblien LLC
+
+-------------------------------------------------------------------------------
+Reservation of Rights and Authorized SaaS Provider
+
+1. You may use, run, modify, and self-host the Software for any purpose,
+   including internal commercial use within your own organization or company,
+   subject to the AGPL-3.0 terms reproduced below.
+
+2. The Commons Clause condition above removes from every licensee the right to
+   "Sell" the Software. This expressly includes offering the Software — or any
+   product or service whose value derives, entirely or substantially, from its
+   functionality — to third parties as a hosted, managed, or
+   "software-as-a-service" (SaaS) offering.
+
+3. Oblien LLC, as copyright holder and Licensor, reserves and retains that
+   right exclusively. Openship and Oblien LLC are the ONLY parties authorized
+   to offer the Software to third parties as a hosted / managed / SaaS service.
+   Any other party wishing to do so must obtain a separate commercial license
+   from Oblien LLC.
+
+4. Oblien LLC may release future versions of the Software under different terms,
+   at its sole discretion. This notice governs this version and any copy that
+   includes it; it does not retroactively alter the terms under which prior
+   copies were received.
+
+For commercial or SaaS licensing inquiries, contact Oblien LLC.
+
+-------------------------------------------------------------------------------
+The full text of the GNU Affero General Public License, version 3.0, follows.
+It applies except as modified by the Commons Clause condition above.
+-------------------------------------------------------------------------------
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 

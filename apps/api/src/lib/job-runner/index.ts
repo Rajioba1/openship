@@ -12,7 +12,7 @@
  */
 
 import IORedis from "ioredis";
-import { env } from "../../config/env";
+import { env, REDIS_REQUIRED } from "../../config/env";
 import { BullMQJobRunner } from "./bullmq";
 import { InProcessJobRunner } from "./in-process";
 import type { JobRunner } from "./types";
@@ -60,7 +60,12 @@ async function pickRunner(): Promise<JobRunner> {
   if (override === "bullmq") {
     return new BullMQJobRunner();
   }
-  // Auto-detect.
+  // Redis required (CLOUD_MODE / OPENSHIP_REQUIRE_REDIS): force BullMQ, skip the
+  // probe. No silent in-process fallback — a SaaS replica MUST share the queue.
+  if (REDIS_REQUIRED) {
+    return new BullMQJobRunner();
+  }
+  // Auto-detect (self-hosted single-box): Redis if reachable, else in-process.
   return (await isRedisReachable()) ? new BullMQJobRunner() : new InProcessJobRunner();
 }
 
