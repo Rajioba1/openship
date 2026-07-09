@@ -8,6 +8,7 @@ import {
 } from "./public-endpoints";
 import { platform } from "./controller-helpers";
 import { getRoutingBaseDomain } from "./routing-domains";
+import { generateToken } from "./domain-token";
 
 interface SyncProjectPublicRoutesInput {
   projectId: string;
@@ -114,6 +115,21 @@ export async function syncProjectPublicRoutes(
   for (const route of desiredRoutes) {
     let existing = existingByHostname.get(route.hostname);
 
+    // A route IS a domain. Free (`*.opsh.io`) routes are host-managed → live
+    // immediately. CUSTOM routes must prove DNS ownership first, so a NEW
+    // custom row is created pending (with a deterministic verification token)
+    // and only the /verify endpoint promotes it. This is the single place that
+    // decides verification for endpoint-created rows — the old behavior
+    // silently marked custom domains verified with no DNS check.
+    const verificationFields =
+      route.domainType === "custom"
+        ? {
+            status: "pending" as const,
+            verified: false,
+            verificationToken: generateToken(route.hostname),
+          }
+        : { status: "active" as const, verified: true, verifiedAt: new Date() };
+
     if (!existing) {
       const globalExisting = await repos.domain.findByHostname(route.hostname);
       if (globalExisting) {
@@ -148,9 +164,7 @@ export async function syncProjectPublicRoutes(
           targetPath: route.targetPath,
           domainType: route.domainType,
           isPrimary: route.isPrimary,
-          status: "active",
-          verified: true,
-          verifiedAt: new Date(),
+          ...verificationFields,
         });
       } catch (err: any) {
         if (err?.cause?.code === "23505" || err?.code === "23505") {
@@ -172,9 +186,7 @@ export async function syncProjectPublicRoutes(
                 targetPath: route.targetPath,
                 domainType: route.domainType,
                 isPrimary: route.isPrimary,
-                status: "active",
-                verified: true,
-                verifiedAt: new Date(),
+                ...verificationFields,
               });
             }
           } else {
@@ -195,11 +207,16 @@ export async function syncProjectPublicRoutes(
     if ((existing.targetPath ?? null) !== (route.targetPath ?? null)) patch.targetPath = route.targetPath ?? null;
     if ((existing.domainType ?? null) !== route.domainType) patch.domainType = route.domainType;
     if (existing.isPrimary !== route.isPrimary) patch.isPrimary = route.isPrimary;
-    if (!existing.verified) {
-      patch.verified = true;
-      patch.verifiedAt = new Date();
+    // Auto-verify only host-managed (free) rows. A custom row's verified/status
+    // is owned by the /verify DNS check — a re-save (port edit, reorder) must
+    // NOT silently verify a pending custom nor reset a verified one.
+    if (route.domainType !== "custom") {
+      if (!existing.verified) {
+        patch.verified = true;
+        patch.verifiedAt = new Date();
+      }
+      if (existing.status !== "active") patch.status = "active";
     }
-    if (existing.status !== "active") patch.status = "active";
 
     if (Object.keys(patch).length > 0) {
       await repos.domain.update(existing.id, patch);

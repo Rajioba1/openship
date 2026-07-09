@@ -207,6 +207,10 @@ export const DomainSettings = () => {
   const { baseDomain, selfHosted } = usePlatform();
 
   const [newDomain, setNewDomain] = useState("");
+  // Unified "add domain" = add a route: pick free/custom + the port it maps to.
+  // Same model services use; single-app just gets a lighter form.
+  const [newDomainType, setNewDomainType] = useState<"free" | "custom">("custom");
+  const [newDomainPort, setNewDomainPort] = useState("");
   const [showCustomDomainSection, setShowCustomDomainSection] = useState(false);
   const [includeWww, setIncludeWww] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -407,7 +411,9 @@ export const DomainSettings = () => {
   // dot, not end with the managed suffix, not be an IP literal. We
   // skip preview for invalid input rather than firing a doomed request.
   useEffect(() => {
-    if (!showCustomDomainSection || !selfHosted) {
+    // Only custom domains have records to preview — free subdomains are
+    // host-managed (no DNS to apply).
+    if (!showCustomDomainSection || !selfHosted || newDomainType !== "custom") {
       setPreviewedRecords([]);
       return;
     }
@@ -449,88 +455,78 @@ export const DomainSettings = () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [newDomain, selfHosted, showCustomDomainSection, baseDomain]);
+  }, [newDomain, newDomainType, selfHosted, showCustomDomainSection, baseDomain]);
 
+  // Add a domain = add a ROUTE (the same model services use): pick free/custom,
+  // the host, and the port (server) / path (static) it maps to. It lands in the
+  // project's publicEndpoints so it shows in the list below and is fully
+  // operable. Custom domains are created PENDING (backend: syncProjectPublicRoutes)
+  // and must be DNS-verified before they go live; we surface their records +
+  // Verify via the connect call, which returns the real domain-row id.
   const handleSubmitDomains = async () => {
-    const trimmedDomain = newDomain.trim();
-    if (!trimmedDomain) return;
+    const host = newDomain.trim().toLowerCase();
+    if (!host) return;
+    const isCustom = newDomainType === "custom";
+    const portValue = newDomainPort.trim();
 
-    setIsSubmitting(true);
-
-    // api.post THROWS on non-2xx (ApiError carrying body + status). Without
-    // a try/catch the spinner stuck on forever when the backend rejected
-    // the hostname (ValidationError on .opsh.io / IP / conflict, etc.) and
-    // the user never saw a toast — they just saw the loader spin. Wrap
-    // the whole flow so every exit path either toasts and clears the
-    // spinner, or surfaces a generic message + clears the spinner.
-    try {
-      const result = await projectsApi.connectDomain(id, {
-        domain: trimmedDomain,
-        includeWww,
-      });
-
-      // Legacy "success: false" envelope path — some old endpoints return
-      // 200 with { success: false }. Keep handling it for parity with the
-      // rest of the codebase.
-      if (!result.success) {
-        showToast(
-          result.error || "Failed to connect domain",
-          "error",
-          result.message || "Failed to connect domain",
-        );
+    if (hasProjectServer) {
+      const portNum = Number(portValue);
+      if (!portValue || !Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
+        showToast("Enter the port this domain should route to (1–65535).", "error", "Add domain");
         return;
       }
+    }
 
-      if (result.records?.records) {
-        setDnsRecords(result.records.records);
+    setIsSubmitting(true);
+    try {
+      // Custom: create the pending row + get its DNS records + real verify id
+      // up front. persist (below) then attaches the port and lists it; the
+      // backend keeps it pending until /verify.
+      if (isCustom) {
+        const result = await projectsApi.connectDomain(id, { domain: host, includeWww });
+        if (!result.success) {
+          showToast(
+            result.error || "Failed to add domain",
+            "error",
+            result.message || "Add domain failed",
+          );
+          return;
+        }
+        if (result.records?.records) setDnsRecords(result.records.records);
+        setPendingVerifyDomain(
+          typeof result.domain?.id === "string"
+            ? { id: result.domain.id, hostname: host }
+            : null,
+        );
       }
 
-      // Remember the row the user just connected so the DNS Records panel
-      // can surface a Verify CTA after they paste the records into their
-      // DNS provider. We only set this when the backend returned a real
-      // dom_... id — without that the Verify endpoint has nothing to call.
-      if (typeof result.domain?.id === "string") {
-        setPendingVerifyDomain({ id: result.domain.id, hostname: trimmedDomain });
-      } else {
+      const nextEndpoint = createPublicEndpoint({
+        domainType: newDomainType,
+        ...(isCustom ? { customDomain: host } : { domain: host }),
+        ...(hasProjectServer ? { port: portValue } : { targetPath: "/" }),
+      });
+      const label = isCustom ? host : `${host}.${baseDomain}`;
+      const ok = await persistPublicEndpoints(
+        [...publicEndpoints, nextEndpoint],
+        isCustom
+          ? `${label} added — apply the DNS records, then Verify.`
+          : `${label} added.`,
+      );
+      if (!ok) return;
+
+      // Reset the form. Keep the panel open for custom (DNS records + Verify);
+      // free has nothing to verify, so collapse it.
+      setNewDomain("");
+      setNewDomainPort(projectRuntimePort);
+      setIncludeWww(false);
+      if (!isCustom) {
+        setShowCustomDomainSection(false);
+        setDnsRecords([]);
         setPendingVerifyDomain(null);
       }
-
-      // The backend creates the domain row with verified=false + status=pending.
-      // Reflect that locally rather than lying with `verified: true` — the
-      // user still has to add the DNS records (now visible below) and click
-      // Verify before the row actually goes live.
-      const newDomainObj = {
-        id: result.domain?.id ?? Date.now(),
-        domain: trimmedDomain,
-        hostname: trimmedDomain,
-        primary: domainsData.domains.length === 0,
-        verified: false,
-        status: "pending" as const,
-      };
-
-      const updatedDomains = [
-        ...domainsData.domains.map((d) => ({
-          ...d,
-          primary: newDomainObj.primary ? false : d.primary,
-        })),
-        newDomainObj,
-      ];
-
-      updateDomains(updatedDomains);
-      showToast(
-        `${trimmedDomain} added — apply the DNS records below, then click Verify.`,
-        "success",
-        "Domain pending verification",
-      );
-      setShowCustomDomainSection(true);
     } catch (err) {
-      // 4xx/5xx path — getApiErrorMessage walks the ApiError body looking
-      // for the standard {error, message} shape the API throws via
-      // ValidationError/ConflictError/etc. Fall back to a generic line if
-      // it can't extract anything readable.
-      console.error("Failed to connect domain:", err);
-      const message = getApiErrorMessage(err) || "Failed to connect domain";
-      showToast(message, "error", "Connect domain failed");
+      console.error("Failed to add domain:", err);
+      showToast(getApiErrorMessage(err) || "Failed to add domain", "error", "Add domain failed");
     } finally {
       setIsSubmitting(false);
     }
@@ -709,6 +705,10 @@ export const DomainSettings = () => {
           domain?.hostname === hostname
         ));
 
+        // Custom domains are pending until DNS-verified (matches the backend);
+        // free/managed domains are host-verified immediately. Don't optimistically
+        // flash a new custom domain as "Verified".
+        const isCustom = endpoint.domainType === "custom";
         return {
           ...existing,
           id: existing?.id || endpoints[index]?.id || hostname,
@@ -716,8 +716,8 @@ export const DomainSettings = () => {
           domain: hostname,
           primary: index === 0,
           isPrimary: index === 0,
-          verified: existing?.verified ?? true,
-          status: existing?.status ?? "active",
+          verified: existing?.verified ?? !isCustom,
+          status: existing?.status ?? (isCustom ? "pending" : "active"),
           sslStatus: existing?.sslStatus ?? (endpoint.domainType === "free" ? "active" : "none"),
           targetPort: endpoint.port ?? null,
           targetPath: endpoint.targetPath ?? null,
@@ -1009,8 +1009,14 @@ export const DomainSettings = () => {
       setPreviewedRecords([]);
       setPendingVerifyDomain(null);
       setNewDomain("");
+      setNewDomainType("custom");
+      setNewDomainPort("");
       setIncludeWww(false);
     } else {
+      // Seed the port with the project's runtime port — for a single-app
+      // server every domain routes to the same process, so this is the
+      // right default; the user can still change it.
+      setNewDomainPort(projectRuntimePort);
       setShowCustomDomainSection(true);
     }
   };
@@ -1062,43 +1068,87 @@ export const DomainSettings = () => {
         // placeholder noise before the user has done anything.
         <div className={`grid grid-cols-1 gap-5 ${hasDnsRecords ? "lg:grid-cols-2" : ""}`}>
           <SectionCard
-            title="Custom Domain"
-            description="Attach your own domain and keep it as the production entrypoint"
+            title="Add domain"
+            description="Add a route: pick a free or custom domain and the port it maps to."
             icon={Plus}
             iconTone="blue"
           >
             <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-[13px] font-medium text-foreground">Domain name</label>
-                <input
-                  placeholder="yourdomain.com"
-                  value={newDomain}
-                  onChange={(e) => setNewDomain(e.target.value)}
-                  className="w-full rounded-xl border border-border bg-background px-4 py-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/40"
-                />
+              {/* Route type — free (host-managed) vs custom (DNS-verified). */}
+              <div className="flex items-center gap-2">
+                {(["free", "custom"] as const).map((type) => (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => setNewDomainType(type)}
+                    className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                      newDomainType === type
+                        ? "bg-primary/10 text-primary ring-1 ring-primary/15"
+                        : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
+                    }`}
+                  >
+                    {type === "free" ? "Free subdomain" : "Custom domain"}
+                  </button>
+                ))}
               </div>
 
-              <div className="flex items-center justify-between rounded-xl border border-border/50 bg-muted/25 px-4 py-3">
-                <div>
-                  <p className="text-[13px] font-medium text-foreground">Include www</p>
-                  <p className="text-[12px] text-muted-foreground">
-                    Also generate records for www.{newDomain || "yourdomain.com"}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setIncludeWww((value) => !value)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${includeWww ? "bg-primary" : "bg-muted"}`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${includeWww ? "translate-x-6" : "translate-x-1"}`}
+              <div className="space-y-2">
+                <label className="text-[13px] font-medium text-foreground">
+                  {newDomainType === "custom" ? "Domain name" : "Subdomain"}
+                </label>
+                <div className="flex items-center overflow-hidden rounded-xl border border-border bg-background transition-colors focus-within:border-primary/40">
+                  <input
+                    placeholder={newDomainType === "custom" ? "yourdomain.com" : projectLabel || "my-app"}
+                    value={newDomain}
+                    onChange={(e) => setNewDomain(e.target.value)}
+                    className="flex-1 bg-transparent px-4 py-3 text-sm text-foreground outline-none placeholder:text-muted-foreground/60"
                   />
-                </button>
+                  {newDomainType === "free" && (
+                    <span className="shrink-0 pr-4 text-sm text-muted-foreground">.{baseDomain}</span>
+                  )}
+                </div>
               </div>
+
+              {hasProjectServer && (
+                <div className="space-y-2">
+                  <label className="text-[13px] font-medium text-foreground">Maps to port</label>
+                  <input
+                    value={newDomainPort}
+                    onChange={(e) => setNewDomainPort(e.target.value)}
+                    placeholder={projectRuntimePort || "3000"}
+                    inputMode="numeric"
+                    className="w-full rounded-xl border border-border bg-background px-4 py-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/40"
+                  />
+                </div>
+              )}
+
+              {newDomainType === "custom" && (
+                <div className="flex items-center justify-between rounded-xl border border-border/50 bg-muted/25 px-4 py-3">
+                  <div>
+                    <p className="text-[13px] font-medium text-foreground">Include www</p>
+                    <p className="text-[12px] text-muted-foreground">
+                      Also generate records for www.{newDomain || "yourdomain.com"}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setIncludeWww((value) => !value)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${includeWww ? "bg-primary" : "bg-muted"}`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${includeWww ? "translate-x-6" : "translate-x-1"}`}
+                    />
+                  </button>
+                </div>
+              )}
 
               <div className="flex justify-end">
                 <button
                   onClick={handleSubmitDomains}
-                  disabled={!newDomain.trim() || isSubmitting}
+                  disabled={
+                    !newDomain.trim() ||
+                    (hasProjectServer && !newDomainPort.trim()) ||
+                    isSubmitting
+                  }
                   className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-colors hover:bg-foreground/90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isSubmitting ? (
@@ -1106,7 +1156,7 @@ export const DomainSettings = () => {
                   ) : (
                     <Plus className="size-4" />
                   )}
-                  {isSubmitting ? "Preparing records" : "Connect domain"}
+                  {isSubmitting ? "Adding..." : "Add domain"}
                 </button>
               </div>
             </div>
@@ -1117,7 +1167,7 @@ export const DomainSettings = () => {
               title="DNS Records"
               description={
                 isPreviewOnly
-                  ? "Add these records at your DNS provider, then click Connect domain to attach it"
+                  ? "Add these records at your DNS provider, then click Add domain to attach it"
                   : "Apply these records at your DNS provider, then wait for propagation"
               }
               icon={Link2}
@@ -1135,7 +1185,7 @@ export const DomainSettings = () => {
 
               <div className="rounded-xl bg-muted/35 px-4 py-3 text-[12px] text-muted-foreground">
                 {isPreviewOnly
-                  ? "Add these records first — they don't change after Connect, so propagation starts now. Then press Connect domain to attach it, and finally Verify once DNS resolves."
+                  ? "Add these records first — they don't change after adding, so propagation starts now. Then press Add domain to attach it, and finally Verify once DNS resolves."
                   : "DNS changes can take up to 48 hours to propagate globally. Once the records resolve, click Verify below — we'll check DNS, mark the domain active, and provision SSL in the background."}
               </div>
 

@@ -98,7 +98,7 @@ r.post("/:id/sleep-mode", { tag: "project:write" }, cloudProjectProxy, ctrl.setS
 
 /* ─── Deployments ──────────────────────────────────────────────────────── */
 r.get("/:id/deployments", { tag: "project:deployment:list" }, cloudProjectProxy, ctrl.listDeployments);
-r.post("/:id/deployment-session", { tag: "project:deployment:write" }, cloudProjectProxy, ctrl.deploymentSession);
+r.post("/:id/deployment-session", { tag: "project:read", readOnly: true }, cloudProjectProxy, ctrl.deploymentSession);
 
 /* ─── Custom domain ────────────────────────────────────────────────────── */
 r.post("/:id/connect", { tag: "project:write" }, cloudProjectProxy, ctrl.connectDomain);

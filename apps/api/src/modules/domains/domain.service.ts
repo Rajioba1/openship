@@ -14,7 +14,6 @@
  * in the SSL status pill on the next read.
  */
 
-import { createHmac } from "node:crypto";
 import { repos, type Domain, type Project } from "@repo/db";
 import { NotFoundError, ConflictError, ValidationError, safeErrorMessage } from "@repo/core";
 import { platform, assertResourceInOrg } from "../../lib/controller-helpers";
@@ -22,24 +21,10 @@ import { buildBackgroundContext, type RequestContext } from "../../lib/request-c
 import { manageDomainSsl } from "../../lib/domain-ssl";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { resolveRecords } from "../../lib/dns-resolver";
-import { env } from "../../config/env";
 import { resolveProjectServerHost } from "../../lib/server-target";
+import { generateToken } from "../../lib/domain-token";
 import type { TAddDomainBody } from "./domain.schema";
 import type { CloudRuntime } from "@repo/adapters";
-
-// ─── Token ───────────────────────────────────────────────────────────────────
-
-/**
- * Deterministic verification token for a hostname.
- * HMAC-SHA256(hostname, secret) → hex prefix. Same input always produces
- * the same output so preview and stored tokens match.
- */
-function generateToken(hostname: string): string {
-  return createHmac("sha256", env.BETTER_AUTH_SECRET)
-    .update(hostname.toLowerCase())
-    .digest("hex")
-    .slice(0, 16);
-}
 
 // ─── List ────────────────────────────────────────────────────────────────────
 

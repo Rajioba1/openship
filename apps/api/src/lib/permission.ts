@@ -54,7 +54,6 @@ const GRANTABLE_ROOTS: ResourceType[] = [
   "github_installation",
   "github_repository",
   "permissions",
-  "domain",
   "settings",
   "terminal",
   // Org-singleton feature. INVARIANT: every cloud operation reaches the SaaS
