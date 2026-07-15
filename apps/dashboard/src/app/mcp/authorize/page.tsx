@@ -235,149 +235,131 @@ function McpAuthorizeInner() {
         </div>
       </div>
 
-      {/* Body — every access choice on the left rail · resource detail on the right. */}
-      <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)] lg:items-start">
-        {/* LEFT — identity, org, and the Full/Limited + read-only choices. */}
-        <div className="space-y-4">
-          <div className="rounded-xl border border-border/50 bg-muted/20 p-4 text-sm">
-            <p className="text-muted-foreground">
-              Signed in as{" "}
-              <span className="font-medium text-foreground">{session?.user?.email}</span>
-            </p>
-            <p className="mt-2 break-all text-muted-foreground">
-              Client <span className="font-mono text-xs text-foreground">{clientId}</span>
-            </p>
-          </div>
-
-          {/* Switching org changes your active workspace so the scope matches. */}
-          {orgs.length > 0 && (
-            <div className="rounded-xl border border-border/50 p-4">
-              <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                <Building2 className="size-3.5 text-muted-foreground" />
-                Organization
-              </div>
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                The client can act only within this organization.
-              </p>
-              {orgs.length > 1 ? (
-                <div className="relative mt-2">
-                  <select
-                    value={orgId ?? ""}
-                    onChange={(e) => handleOrgChange(e.target.value)}
-                    disabled={busy}
-                    className="w-full appearance-none rounded-lg border border-border/60 bg-background px-3 py-2 pr-9 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
-                  >
-                    {orgs.map((o) => (
-                      <option key={o.id} value={o.id}>{o.name}</option>
-                    ))}
-                  </select>
-                  {orgSwitching && (
-                    <Loader2 className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
-                  )}
-                </div>
-              ) : (
-                <p className="mt-2 text-sm font-medium text-foreground">{orgs[0]?.name}</p>
-              )}
-            </div>
-          )}
-
-          {/* Access level: explicit Full vs Limited so what's granted is obvious. */}
-          <div className="space-y-3 rounded-xl border border-border/50 p-4">
-            <div>
-              <h2 className="text-sm font-semibold text-foreground">How much access to grant</h2>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                You can only grant access you already hold yourself.
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <AccessOption
-                active={mode === "full"}
-                disabled={busy}
-                onClick={() => setMode("full")}
-                title="Full access"
-                badge="Recommended"
-                desc={`Deploy, create, and manage everything in ${orgName} that you can. Best for your own client.`}
-              />
-              <AccessOption
-                active={mode === "limited"}
-                disabled={busy}
-                onClick={() => setMode("limited")}
-                title="Limited access"
-                desc="Restrict the client to only the specific resources you choose."
-              />
-            </div>
-
-            {/* Read-only modifier — applies to whichever mode is selected. */}
-            <label className="flex cursor-pointer select-none items-start gap-3 rounded-xl border border-border/50 p-3">
-              <input
-                type="checkbox"
-                checked={readOnly}
-                onChange={(e) => setReadOnly(e.target.checked)}
-                disabled={busy}
-                className="mt-0.5 size-4 rounded border-border/60"
-              />
-              <span className="min-w-0">
-                <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                  <Lock className="size-3.5 text-muted-foreground" />
-                  Read-only
-                </span>
-                <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
-                  The client can view but not deploy, change, or delete.
-                </span>
-              </span>
-            </label>
-          </div>
-
-          {/* Plain-language summary of exactly what this Authorize will grant. */}
-          <div
-            className={`rounded-lg px-3 py-2 text-xs ${
-              limitedButEmpty
-                ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                : "bg-muted/30 text-muted-foreground"
-            }`}
-          >
-            {summary}
-          </div>
+      {/* Who + which org */}
+      <div className="space-y-3">
+        <div className="rounded-xl border border-border/50 bg-muted/20 p-4 text-sm">
+          <p className="text-muted-foreground">
+            Signed in as{" "}
+            <span className="font-medium text-foreground">{session?.user?.email}</span>
+          </p>
+          <p className="mt-2 break-all text-muted-foreground">
+            Client <span className="font-mono text-xs text-foreground">{clientId}</span>
+          </p>
         </div>
 
-        {/* RIGHT — resource detail: the picker when Limited, a note when Full. */}
-        <div className="rounded-xl border border-border/50 p-5">
-          {mode === "limited" ? (
-            <div className="space-y-3">
-              <div>
-                <h2 className="text-sm font-semibold text-foreground">Resources this client can reach</h2>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  Choose the resources this client may access.
-                </p>
-              </div>
-              <ResourcePicker
-                key={orgId ?? "none"}
-                value={grants}
-                onChange={setGrants}
-                availableTypes={grantableTypes(selfHosted)}
-                defaultPermissions={["read", "write"]}
-                disabled={busy}
-              />
+        {/* Switching org changes your active workspace so the scope matches. */}
+        {orgs.length > 0 && (
+          <div className="rounded-xl border border-border/50 p-4">
+            <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+              <Building2 className="size-3.5 text-muted-foreground" />
+              Organization
             </div>
-          ) : (
-            <div className="flex min-h-[220px] flex-col items-center justify-center gap-3 text-center">
-              <div className="flex size-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-                {readOnly ? <Lock className="size-5" /> : <ShieldCheck className="size-5" />}
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              The client can act only within this organization.
+            </p>
+            {orgs.length > 1 ? (
+              <div className="relative mt-2">
+                <select
+                  value={orgId ?? ""}
+                  onChange={(e) => handleOrgChange(e.target.value)}
+                  disabled={busy}
+                  className="w-full appearance-none rounded-lg border border-border/60 bg-background px-3 py-2 pr-9 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+                >
+                  {orgs.map((o) => (
+                    <option key={o.id} value={o.id}>{o.name}</option>
+                  ))}
+                </select>
+                {orgSwitching && (
+                  <Loader2 className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
+                )}
               </div>
-              <div>
-                <p className="text-sm font-medium text-foreground">
-                  {readOnly ? "Full read-only access" : "Full access"}
-                </p>
-                <p className="mx-auto mt-1 max-w-xs text-xs leading-relaxed text-muted-foreground">
-                  {readOnly
-                    ? `This client can view everything in ${orgName} that you can, but can't make changes.`
-                    : `This client acts with your role in ${orgName} — no resource restrictions. Switch to Limited to scope it to specific resources.`}
-                </p>
-              </div>
-            </div>
-          )}
+            ) : (
+              <p className="mt-2 text-sm font-medium text-foreground">{orgs[0]?.name}</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Access level — explicit Full vs Limited. The resource picker expands
+          inline only under Limited, so there's never a dead/empty panel. */}
+      <div className="space-y-3 rounded-xl border border-border/50 p-4">
+        <div>
+          <h2 className="text-sm font-semibold text-foreground">How much access to grant</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            You can only grant access you already hold yourself.
+          </p>
         </div>
+
+        <AccessOption
+          active={mode === "full"}
+          disabled={busy}
+          onClick={() => setMode("full")}
+          title="Full access"
+          badge="Recommended"
+          desc={`Deploy, create, and manage everything in ${orgName} that you can. Best for your own client.`}
+        />
+        <AccessOption
+          active={mode === "limited"}
+          disabled={busy}
+          onClick={() => setMode("limited")}
+          title="Limited access"
+          desc="Restrict the client to only the specific resources you choose."
+        />
+
+        {/* Limited → resource picker, inline under the option. */}
+        {mode === "limited" && (
+          <div className="rounded-xl border border-border/50 bg-muted/10 p-3">
+            <p className="mb-3 text-xs text-muted-foreground">
+              Choose the resources this client may access:
+            </p>
+            <ResourcePicker
+              key={orgId ?? "none"}
+              value={grants}
+              onChange={setGrants}
+              availableTypes={grantableTypes(selfHosted)}
+              defaultPermissions={["read", "write"]}
+              disabled={busy}
+            />
+          </div>
+        )}
+
+        {/* Read-only modifier — applies to whichever mode is selected. */}
+        <label className="flex cursor-pointer select-none items-start gap-3 rounded-xl border border-border/50 p-3">
+          <input
+            type="checkbox"
+            checked={readOnly}
+            onChange={(e) => setReadOnly(e.target.checked)}
+            disabled={busy}
+            className="mt-0.5 size-4 rounded border-border/60"
+          />
+          <span className="min-w-0">
+            <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+              <Lock className="size-3.5 text-muted-foreground" />
+              Read-only
+            </span>
+            <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+              The client can view but not deploy, change, or delete.
+            </span>
+          </span>
+        </label>
+      </div>
+
+      {/* Plain-language summary of exactly what this Authorize will grant. */}
+      <div
+        className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs ${
+          limitedButEmpty
+            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+            : "bg-muted/30 text-muted-foreground"
+        }`}
+      >
+        {limitedButEmpty ? (
+          <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+        ) : readOnly ? (
+          <Lock className="mt-0.5 size-3.5 shrink-0" />
+        ) : (
+          <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
+        )}
+        <span>{summary}</span>
       </div>
 
       {error && (
@@ -450,7 +432,7 @@ function AccessOption({
 
 export default function McpAuthorizePage() {
   return (
-    <AuthShell maxWidth="max-w-4xl">
+    <AuthShell maxWidth="max-w-lg">
       <Suspense
         fallback={
           <div className="flex items-center justify-center py-10 text-muted-foreground">
