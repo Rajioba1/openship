@@ -28,6 +28,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
 import { promisify } from "node:util";
 import { getBuildImage, safeErrorMessage, type StackId } from "@repo/core";
+import { provisionCloudWorkspace } from "@repo/adapters";
 import { env } from "../../../config/env";
 import { getNamespaceClient } from "../../../lib/openship-cloud";
 import {
@@ -42,14 +43,13 @@ const execFileAsync = promisify(execFile);
 /** How long a session (and the workspace/staging dir it points at) is valid —
  *  generous so upload → wizard → deploy comfortably fits. */
 const SESSION_TTL_MS = 60 * 60_000;
-/** Oblien scoped-token / workspace TTL. Token max is 3600s; workspace is made
- *  permanent on deploy, removed on TTL otherwise. */
+/** Oblien workspace TTL — long enough for upload → wizard → deploy to fit. The
+ *  workspace is promoted to permanent on deploy, reaped on TTL/exit otherwise. */
 const WORKSPACE_TTL = "60m";
-const TOKEN_TTL_S = 3600;
 
 /** Build-time resources for the upload workspace. Deploy makes it permanent
  *  (and can resize); these just need to be enough to install + build. */
-const UPLOAD_BUILD_RESOURCES = { cpus: 2, memory_mb: 2048, disk_size_mb: 8192 } as const;
+const UPLOAD_BUILD_RESOURCES = { cpuCores: 2, memoryMb: 2048, diskMb: 8192 } as const;
 
 /** Oblien runtime gateway (routes by the workspace-scoped token). Server-side
  *  only — the browser never learns this; it just gets an opaque upload URL. */
@@ -113,10 +113,8 @@ export async function createFolderSession(
     // ── SaaS: direct browser → Oblien workspace ──
     // Use the org's NAMESPACE-scoped client (same as every other cloud service:
     // cloud-pages, cloud-edge-proxy, deploy). The master client can create a
-    // namespaced workspace but then can't resolve it by bare id — runtime()/
-    // tokens.create fail "workspace does not exist". The namespace token gates
-    // by-id ops to this org's namespace, so create + runtime + mint all agree.
-    const { client, namespace } = await getNamespaceClient(input.orgId);
+    // namespaced workspace but then can't resolve it by bare id.
+    const { client } = await getNamespaceClient(input.orgId);
     // The workspace image is fixed at create time, so resolve it from the
     // client-detected stack when known; fall back to a general JS/TS base
     // otherwise (most uploads are Node/Bun; a mismatch just means the user
@@ -129,62 +127,34 @@ export async function createFolderSession(
       image = input.packageManager === "bun" ? "oven/bun:latest" : "node:22";
     }
 
-    let workspaceId: string;
-    try {
-      const ws = await client.workspaces.create({
-        name: `upload-${input.orgId.slice(0, 16)}-${id.slice(0, 6)}`,
-        namespace,
-        image,
-        mode: "temporary",
-        config: {
-          cpus: UPLOAD_BUILD_RESOURCES.cpus,
-          memory_mb: UPLOAD_BUILD_RESOURCES.memory_mb,
-          disk_size_mb: UPLOAD_BUILD_RESOURCES.disk_size_mb,
-        },
-      });
-      workspaceId = ws.id;
-    } catch (err) {
-      throw new Error(`Failed to provision upload workspace: ${safeErrorMessage(err)}`);
-    }
-
-    // Temporary from creation with auto-cleanup: if the upload or deploy never
-    // completes, Oblien reaps the workspace — no orphan, nothing to hand-delete.
-    // A successful deploy promotes it to permanent (build/access →
-    // adoptWorkspaceRuntime → makePermanent), exactly like a build workspace.
-    // `remove_on_exit` mirrors provisionBuildWorkspace; create-time ttl is
-    // unreliable so it's set here (best-effort — the row is already temporary).
-    const ws = client.workspace(workspaceId);
-    await ws.lifecycle
-      .makeTemporary({ ttl: WORKSPACE_TTL, ttl_action: "remove", remove_on_exit: true })
-      .catch(() => {});
-
+    let workspaceId: string | undefined;
     let uploadToken: string;
     try {
-      // Acquire the runtime handle before minting the upload token. This is the
-      // SAME step the deploy path uses (provisionBuildWorkspace /
-      // adoptWorkspaceRuntime): it waits out the post-create eventual-consistency
-      // AND enables the workspace's runtime API server — which is what the
-      // browser then POSTs the tar.gz to. Minting/uploading before this raced the
-      // create ("workspace does not exist"). One short backoff, same as deploy.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await ws.runtime();
-          break;
-        } catch (err) {
-          if (attempt >= 2) throw err;
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-      }
-      const tok = await client.tokens.create({
-        scope: "workspace",
-        workspaceId,
-        ttl: TOKEN_TTL_S,
-        label: `folder-upload ${id.slice(0, 6)}`,
+      // Provision with the SAME primitive the deploy path uses (create temporary
+      // → makeTemporary(remove_on_exit) → connect runtime, with retry): a failed
+      // upload/deploy is reaped by Oblien, a successful deploy promotes it to
+      // permanent (build/access → adoptWorkspaceRuntime).
+      const provisioned = await provisionCloudWorkspace(client, {
+        name: `upload-${input.orgId.slice(0, 16)}-${id.slice(0, 6)}`,
+        image,
+        mode: "temporary",
+        resources: UPLOAD_BUILD_RESOURCES,
+        ttl: WORKSPACE_TTL,
       });
-      uploadToken = tok.token;
+      workspaceId = provisioned.workspaceId;
+
+      // The browser uploads the tar.gz straight to the workspace's runtime
+      // gateway, authenticated with its Gateway JWT. provisionCloudWorkspace
+      // already enabled the API server (via runtime()), so getToken just reads
+      // that JWT — a workspace-level op the namespace client is allowed to do,
+      // unlike the admin-only top-level tokens.create.
+      const status = await client.workspace(workspaceId).apiAccess.getToken();
+      if (!status.token) throw new Error("runtime API server returned no token");
+      uploadToken = status.token;
     } catch (err) {
-      // remove_on_exit reaps it regardless; delete eagerly so we don't wait.
-      await ws.delete().catch(() => {});
+      // provisionCloudWorkspace cleans up its own failures; this only runs if it
+      // succeeded but the token read didn't. remove_on_exit/TTL is the backstop.
+      if (workspaceId) await client.workspace(workspaceId).delete().catch(() => {});
       throw new Error(`Failed to provision upload workspace: ${safeErrorMessage(err)}`);
     }
 

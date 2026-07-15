@@ -284,6 +284,83 @@ type DockerfileBuildSource =
  *  the convention lives in one place. */
 export const PAGE_CONTAINER_PREFIX = "page:";
 
+/**
+ * Create a temporary cloud workspace and connect its runtime — the single
+ * "provision a workspace" primitive, shared by the build pipeline
+ * ({@link CloudRuntime} via `provisionWorkspace`) and the folder-upload session
+ * flow (`folder.service`, which then reads the runtime's Gateway JWT for the
+ * browser to upload with).
+ *
+ * `client` MUST be namespace-scoped for the org: `create` + the by-id
+ * `runtime()` resolve within the org's namespace. A master/admin client can
+ * create a namespaced workspace but then can't find it by bare id — `runtime()`
+ * fails "workspace does not exist". The retry rides out post-create eventual
+ * consistency. On any failure the half-provisioned workspace is deleted.
+ */
+export async function provisionCloudWorkspace(
+  client: Oblien,
+  config: {
+    name: string;
+    image: string;
+    mode: "temporary" | "permanent";
+    resources: ResourceConfig;
+    env?: Record<string, string>;
+    ttl?: string;
+  },
+  logger?: BuildLogger,
+): Promise<{ workspaceId: string; runtime: CloudWorkspaceRuntime }> {
+  logger?.log(`Creating workspace from image "${config.image}"...\n`);
+
+  let wsData: { id: string };
+  try {
+    wsData = await client.workspaces.create({
+      name: config.name,
+      image: config.image,
+      mode: config.mode,
+      config: {
+        cpus: config.resources.cpuCores,
+        memory_mb: config.resources.memoryMb,
+        disk_size_mb: config.resources.diskMb,
+        env: toEnvArray(config.env ?? {}),
+      },
+    });
+  } catch (err) {
+    logger?.log(`Failed to create workspace from image "${config.image}": ${safeErrorMessage(err)}\n`, "error");
+    throw err;
+  }
+
+  const ws = client.workspace(wsData.id);
+  try {
+    if (config.mode === "temporary" && config.ttl) {
+      try {
+        await ws.lifecycle.makeTemporary({ ttl: config.ttl, ttl_action: "remove", remove_on_exit: true });
+      } catch {
+        // TTL failure is non-fatal - workspace will be cleaned up eventually.
+      }
+    }
+
+    logger?.log("Connecting to build environment...\n");
+    let rt: CloudWorkspaceRuntime | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        rt = await ws.runtime();
+        break;
+      } catch (err) {
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+        else throw err;
+      }
+    }
+    if (!rt) throw new Error("Failed to connect to build environment");
+
+    logger?.log("Build environment ready\n");
+    return { workspaceId: wsData.id, runtime: rt };
+  } catch (err) {
+    await ws.delete().catch(() => {});
+    logger?.log(`Failed to prepare workspace "${wsData.id}": ${safeErrorMessage(err)}\n`, "error");
+    throw err;
+  }
+}
+
 export class CloudRuntime implements MultiServiceRuntimeAdapter {
   readonly name = "cloud";
   readonly capabilities: ReadonlySet<RuntimeCapability> = new Set<RuntimeCapability>([
@@ -1196,66 +1273,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     },
     logger: BuildLogger,
   ): Promise<{ workspaceId: string; runtime: Awaited<ReturnType<WorkspaceHandle["runtime"]>> }> {
-    logger.log(`Creating workspace from image "${config.image}"...\n`);
-
-    let wsData: { id: string };
-    try {
-      wsData = await this.client.workspaces.create({
-        name: config.name,
-        image: config.image,
-        mode: config.mode,
-        config: {
-          cpus: config.resources.cpuCores,
-          memory_mb: config.resources.memoryMb,
-          disk_size_mb: config.resources.diskMb,
-          env: toEnvArray(config.env ?? {}),
-        },
-      });
-    } catch (err) {
-      const message = safeErrorMessage(err);
-      logger.log(`Failed to create workspace from image "${config.image}": ${message}\n`, "error");
-      throw err;
-    }
-
-    const ws = this.ws(wsData.id);
-
-    try {
-      if (config.mode === "temporary" && config.ttl) {
-        try {
-          await ws.lifecycle.makeTemporary({
-            ttl: config.ttl,
-            ttl_action: "remove",
-            remove_on_exit: true,
-          });
-        } catch {
-          // TTL failure is non-fatal - workspace will be cleaned up eventually.
-        }
-      }
-
-      logger.log("Connecting to build environment...\n");
-      let rt: Awaited<ReturnType<WorkspaceHandle["runtime"]>> | undefined;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          rt = await ws.runtime();
-          break;
-        } catch (err) {
-          if (attempt < 2) {
-            await new Promise((r) => setTimeout(r, 2000));
-          } else {
-            throw err;
-          }
-        }
-      }
-      if (!rt) throw new Error("Failed to connect to build environment");
-
-      logger.log("Build environment ready\n");
-      return { workspaceId: wsData.id, runtime: rt };
-    } catch (err) {
-      await ws.delete().catch(() => {});
-      const message = safeErrorMessage(err);
-      logger.log(`Failed to prepare workspace "${wsData.id}": ${message}\n`, "error");
-      throw err;
-    }
+    return provisionCloudWorkspace(this.client, config, logger);
   }
 
   /**
