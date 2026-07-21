@@ -22,14 +22,7 @@
  */
 
 import { sshManager } from "../../../lib/ssh-manager";
-import {
-  execute,
-  queryOne,
-  queryRows,
-  q,
-  qInt,
-  transaction,
-} from "./psql-runner";
+import { execute, queryOne, queryRows, q, qInt, transaction } from "./psql-runner";
 import { hashPassword } from "./password";
 import {
   createMaildirOnDisk,
@@ -39,10 +32,7 @@ import {
   STORAGE_NODE,
 } from "./maildir";
 import { recountDomain, validateDomain } from "./domains.service";
-import {
-  buildInsertMailboxSql,
-  buildInsertSelfForwardingSql,
-} from "./platform-mailbox.service";
+import { buildInsertMailboxSql, buildInsertSelfForwardingSql } from "./platform-mailbox.service";
 import { safeErrorMessage } from "@repo/core";
 
 const EMAIL_RE = /^[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
@@ -137,10 +127,7 @@ function validateDisplayName(name: string): void {
   }
 }
 
-export async function listMailboxes(
-  serverId: string,
-  domain: string,
-): Promise<MailboxRow[]> {
+export async function listMailboxes(serverId: string, domain: string): Promise<MailboxRow[]> {
   validateDomain(domain);
   return queryRows<MailboxRow>(
     serverId,
@@ -148,10 +135,7 @@ export async function listMailboxes(
   );
 }
 
-export async function getMailbox(
-  serverId: string,
-  email: string,
-): Promise<MailboxRow | null> {
+export async function getMailbox(serverId: string, email: string): Promise<MailboxRow | null> {
   validateEmail(email);
   return queryOne<MailboxRow>(
     serverId,
@@ -219,9 +203,7 @@ export async function createMailbox(
         `DELETE FROM forwardings WHERE address = ${q(username)} AND forwarding = ${q(username)};`,
       );
       throw new Error(
-        `Failed to create Maildir; mailbox was rolled back: ${
-          safeErrorMessage(err)
-        }`,
+        `Failed to create Maildir; mailbox was rolled back: ${safeErrorMessage(err)}`,
       );
     }
 
@@ -269,10 +251,7 @@ export async function updateMailbox(
     }
 
     if (sets.length > 1) {
-      await execute(
-        exec,
-        `UPDATE mailbox SET ${sets.join(", ")} WHERE username = ${q(username)}`,
-      );
+      await execute(exec, `UPDATE mailbox SET ${sets.join(", ")} WHERE username = ${q(username)}`);
     }
 
     // Mirror active flag on the forwardings row so Postfix stops accepting
@@ -336,10 +315,7 @@ export async function softDeleteMailbox(
  * input, so we can't be tricked into rm-ing an arbitrary path. `removeMaildirOnDisk`
  * additionally guards against any path outside /var/vmail/.
  */
-export async function hardDeleteMailbox(
-  serverId: string,
-  email: string,
-): Promise<void> {
+export async function hardDeleteMailbox(serverId: string, email: string): Promise<void> {
   validateEmail(email);
   const username = email.toLowerCase();
   const existing = await getMailbox(serverId, username);
@@ -390,4 +366,3 @@ export class MailboxNotFoundError extends Error {
     super(`Mailbox not found: ${username}`);
   }
 }
-
